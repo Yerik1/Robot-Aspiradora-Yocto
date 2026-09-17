@@ -4,13 +4,12 @@ Linux raspberrypi4 6.6.63-v7l #1 SMP Fri Dec  6 10:10:05 UTC 2024 armv7l GNU/Lin
 root@raspberrypi4:/root# cat /etc/issue
 Poky (Yocto Project Reference Distro) 5.0.15 \n \l
 
-lelito@vm:~/poky-scarthgap-5.0.15/rpi4$ time bitbake core-image-minimal 2>&1 | tee build_log.txt
-du -sh tmp/deploy/images/raspberrypi4/core-image-minimal-raspberrypi4*.wic.bz2 2>/dev/null || \
-du -sh tmp/deploy/images/raspberrypi4/core-image-minimal-raspberrypi4.rpi-sdimg 2>/dev/null
-bitbake: command not found
+lelito@vm:~/poky-scarthgap-5.0.15/rpi4$ bitbake -c cleansstate core-image-minimal
+lelito@vm:~/poky-scarthgap-5.0.15/rpi4$ time bitbake core-image-minimal
 
-real    0m0.186s
-user    0m0.148s
-sys    0m0.042s
-26M    tmp/deploy/images/raspberrypi4/core-image-minimal-raspberrypi4.rootfs-20260917052430.wic.bz2
-4.0K    tmp/deploy/images/raspberrypi4/core-image-minimal-raspberrypi4.rootfs.wic.bz2
+Sstate summary: Wanted 103 Local 98 Mirrors 0 Missed 5 Current 1723 (95% match, 99% complete)
+NOTE: Tasks Summary: Attempted 4059 tasks of which 4039 didn't need to be rerun and all succeeded.
+
+real    1m6.436s
+user    0m1.073s
+sys     0m0.285s
