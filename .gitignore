@@ -52,3 +52,10 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# C / Embedded build artifacts
+*.o
+*.so
+server/robot-server
+users.db
+/tmp/server_test.log

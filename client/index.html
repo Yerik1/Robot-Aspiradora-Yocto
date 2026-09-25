@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robot Aspiradora Autónomo — Control Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+    <!-- Header -->
+    <header>
+        <div class="brand">
+            <span style="font-size: 1.5rem;">🤖</span>
+            <div>
+                <h1>ROBOT ASPIRADORA AUTÓNOMO</h1>
+                <div style="font-size: 0.75rem; color: var(--text-muted);">Sistemas Empotrados (CE-1113) — Raspberry Pi 4</div>
+            </div>
+        </div>
+        <div class="header-status">
+            <span id="conn-status" class="status-badge connecting">CONNECTING...</span>
+            <span id="mode-badge" class="mode-badge mode-manual">MODO MANUAL</span>
+            <span id="user-display" style="font-size: 0.85rem; color: var(--text-secondary);">User: admin</span>
+            <button id="btn-logout" class="btn-secondary">Cerrar Sesión</button>
+        </div>
+    </header>
+
+    <!-- Obstacle Alert Banner -->
+    <div id="obstacle-alert-banner" class="obstacle-alert-banner">
+        <span>⚠️</span>
+        <span>¡ALERTA DE PROXIMIDAD! Se ha detectado un obstáculo a corta distancia.</span>
+    </div>
+
+    <!-- Main Dashboard View -->
+    <main id="dashboard-view" class="dashboard-grid">
+
+        <!-- Card 1: Operating Mode & Suction Motor -->
+        <div class="card card-mode">
+            <div class="card-title">
+                <span>Modo de Operación</span>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">US-401</span>
+            </div>
+            <div class="mode-toggle-group">
+                <button id="btn-mode-manual" class="btn-mode active">Modo Manual</button>
+                <button id="btn-mode-auto" class="btn-mode">Modo Autónomo</button>
+            </div>
+            <div class="switch-container">
+                <div>
+                    <div style="font-weight: 600; font-size: 0.9rem;">Motor de Aspirado</div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">Turbina de succión (ON/OFF)</div>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="switch-vacuum">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div style="margin-top: 14px; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+                * En modo autónomo, el robot navega automáticamente esquivando obstáculos y limpiando la superficie.
+            </div>
+        </div>
+
+        <!-- Card 2: Manual Directional Controls -->
+        <div id="manual-controls-card" class="card card-manual">
+            <div class="card-title">
+                <span>Control de Tracción (Manual)</span>
+                <span id="telemetry-direction" style="font-size: 0.8rem; color: var(--color-cyan); font-family: monospace;">STOP</span>
+            </div>
+
+            <!-- D-Pad -->
+            <div class="dpad-container">
+                <div></div>
+                <button id="dpad-up" class="btn-dpad" title="Avanzar (W / Flecha Arriba)">▲</button>
+                <div></div>
+                <button id="dpad-left" class="btn-dpad" title="Girar Izquierda (A / Flecha Izquierda)">◄</button>
+                <button id="dpad-stop" class="btn-dpad stop" title="Detener (Espacio)">STOP</button>
+                <button id="dpad-right" class="btn-dpad" title="Girar Derecha (D / Flecha Derecha)">►</button>
+                <div></div>
+                <button id="dpad-down" class="btn-dpad" title="Retroceder (S / Flecha Abajo)">▼</button>
+                <div></div>
+            </div>
+
+            <!-- Sliders -->
+            <div class="slider-group">
+                <div class="slider-label">
+                    <span>Velocidad Tracción (PWM)</span>
+                    <span id="val-speed">60%</span>
+                </div>
+                <input type="range" id="slider-speed" min="20" max="100" value="60">
+            </div>
+
+            <div class="slider-group">
+                <div class="slider-label">
+                    <span>Radio de Giro Diferencial</span>
+                    <span id="val-radius">50%</span>
+                </div>
+                <input type="range" id="slider-radius" min="0" max="100" value="50">
+            </div>
+
+            <div style="display: flex; justify-content: space-between; margin-top: 10px; font-size: 0.75rem; color: var(--text-muted);">
+                <span>Motor Izq: <b id="telemetry-left-speed" style="color:var(--text-primary);">0%</b></span>
+                <span>Motor Der: <b id="telemetry-right-speed" style="color:var(--text-primary);">0%</b></span>
+            </div>
+        </div>
+
+        <!-- Card 3: Hardware LEDs Status -->
+        <div class="card card-leds">
+            <div class="card-title">
+                <span>LEDs de Estado de Hardware</span>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">GPIO BCM</span>
+            </div>
+            <div class="leds-container">
+                <div class="led-item">
+                    <div id="led-auto" class="led-indicator led-green"></div>
+                    <div>
+                        <div class="led-label">Modo Autónomo</div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">BCM 12 (D1)</div>
+                    </div>
+                </div>
+                <div class="led-item">
+                    <div id="led-manual" class="led-indicator led-blue active"></div>
+                    <div>
+                        <div class="led-label">Modo Manual</div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">BCM 13 (D2)</div>
+                    </div>
+                </div>
+                <div class="led-item">
+                    <div id="led-obs" class="led-indicator led-red"></div>
+                    <div>
+                        <div class="led-label">Alerta Obstáculo</div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">BCM 20 (D3)</div>
+                    </div>
+                </div>
+                <div class="led-item">
+                    <div id="led-power" class="led-indicator led-amber active"></div>
+                    <div>
+                        <div class="led-label">Sistema Encendido</div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">BCM 21 (D4)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 4: Proximity Sensors Radar -->
+        <div class="card card-sensors">
+            <div class="card-title">
+                <span>Sensores de Proximidad</span>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">HC-SR04</span>
+            </div>
+
+            <!-- Front Sensor -->
+            <div class="sensor-row">
+                <div class="sensor-header">
+                    <span>Frontal (12:00)</span>
+                    <span id="sensor-front-val" style="font-family: monospace; font-weight: 600;">-- cm</span>
+                </div>
+                <div class="sensor-bar-bg">
+                    <div id="sensor-front-bar" class="sensor-fill safe" style="width: 80%;"></div>
+                </div>
+            </div>
+
+            <!-- Left Sensor -->
+            <div class="sensor-row">
+                <div class="sensor-header">
+                    <span>Lateral Izquierdo (9:00)</span>
+                    <span id="sensor-left-val" style="font-family: monospace; font-weight: 600;">-- cm</span>
+                </div>
+                <div class="sensor-bar-bg">
+                    <div id="sensor-left-bar" class="sensor-fill safe" style="width: 80%;"></div>
+                </div>
+            </div>
+
+            <!-- Right Sensor -->
+            <div class="sensor-row">
+                <div class="sensor-header">
+                    <span>Lateral Derecho (3:00)</span>
+                    <span id="sensor-right-val" style="font-family: monospace; font-weight: 600;">-- cm</span>
+                </div>
+                <div class="sensor-bar-bg">
+                    <div id="sensor-right-bar" class="sensor-fill safe" style="width: 80%;"></div>
+                </div>
+            </div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 6px;">
+                Umbral de detección de obstáculo: &le; 18.0 cm
+            </div>
+        </div>
+
+        <!-- Card 5: Audio Playback Control -->
+        <div class="card card-audio">
+            <div class="card-title">
+                <span>Reproducción de Audio (MP3)</span>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">mpg123</span>
+            </div>
+
+            <div class="form-group">
+                <label for="audio-playlist">Pista Seleccionada:</label>
+                <select id="audio-playlist">
+                    <option value="ambient_chill.mp3">ambient_chill.mp3</option>
+                    <option value="cyber_beat.mp3">cyber_beat.mp3</option>
+                    <option value="retro_wave.mp3">retro_wave.mp3</option>
+                    <option value="smooth_jazz.mp3">smooth_jazz.mp3</option>
+                </select>
+            </div>
+
+            <div id="audio-track-display" class="audio-track-info">
+                ambient_chill.mp3 (STOPPED)
+            </div>
+
+            <div class="audio-controls">
+                <button id="btn-audio-play" class="btn-audio" title="Reproducir">▶ Play</button>
+                <button id="btn-audio-pause" class="btn-audio" title="Pausar">⏸ Pause</button>
+                <button id="btn-audio-resume" class="btn-audio" title="Reanudar">⏯ Resume</button>
+                <button id="btn-audio-stop" class="btn-audio" title="Detener">⏹ Stop</button>
+            </div>
+
+            <div class="slider-group">
+                <div class="slider-label">
+                    <span>Volumen de Salida</span>
+                    <span id="val-volume">70%</span>
+                </div>
+                <input type="range" id="slider-volume" min="0" max="100" value="70">
+            </div>
+
+            <div style="font-size: 0.8rem; font-weight: 600; margin-top: 14px; margin-bottom: 4px;">Sonidos de Notificación (Task 3.3):</div>
+            <div class="notif-triggers">
+                <button id="notif-start" class="btn-notif">Arranque Sistema</button>
+                <button id="notif-auto" class="btn-notif">Inicio Autónomo</button>
+                <button id="notif-obs" class="btn-notif">Alerta Obstáculo</button>
+                <button id="notif-manual" class="btn-notif">Modo Manual</button>
+            </div>
+        </div>
+
+        <!-- Card 6: 2D Route Map (Real-time Canvas) -->
+        <div class="card card-map">
+            <div class="card-title">
+                <span>Mapa de Ruta 2D en Tiempo Real</span>
+                <div>
+                    <button id="btn-toggle-grid" class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;">Rejilla</button>
+                    <button id="btn-reset-map" class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;">Limpiar Mapa</button>
+                </div>
+            </div>
+
+            <div class="map-canvas-container">
+                <canvas id="map-canvas" width="450" height="450"></canvas>
+            </div>
+
+            <!-- Legend -->
+            <div class="map-legend">
+                <div class="legend-item">
+                    <div class="legend-box legend-unknown"></div>
+                    <span>No Explorado</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box legend-visited"></div>
+                    <span>Limpio / Visitado</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box legend-obstacle"></div>
+                    <span><b>Obstáculo (Rojo)</b></span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box legend-robot"></div>
+                    <span>Robot (Posición y Rumbo)</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 7: Live Terminal / Event Stream -->
+        <div class="card card-terminal">
+            <div class="card-title">
+                <span>Terminal de Eventos y Telemetría</span>
+                <button id="btn-clear-log" class="btn-secondary" style="padding: 2px 8px; font-size: 0.7rem;">Clear</button>
+            </div>
+            <div id="event-log" class="event-log-box"></div>
+        </div>
+
+    </main>
+
+    <!-- Modal Dialog: Authentication (Login / Register) -->
+    <div id="auth-modal" class="modal-overlay">
+        <div class="auth-card">
+            <h2>Acceso al Sistema</h2>
+            <p class="subtitle">Panel de Control del Robot Aspiradora</p>
+
+            <div class="auth-tabs">
+                <div id="tab-login" class="auth-tab active">Iniciar Sesión</div>
+                <div id="tab-register" class="auth-tab">Registrarse</div>
+            </div>
+
+            <!-- Login Form -->
+            <div id="form-login">
+                <div class="form-group">
+                    <label for="login-username">Usuario</label>
+                    <input type="text" id="login-username" value="admin" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Contraseña</label>
+                    <input type="password" id="login-password" value="admin123" autocomplete="current-password">
+                </div>
+                <button id="btn-do-login" class="btn-primary">Iniciar Sesión</button>
+            </div>
+
+            <!-- Register Form -->
+            <div id="form-register" style="display: none;">
+                <div class="form-group">
+                    <label for="reg-username">Nuevo Usuario</label>
+                    <input type="text" id="reg-username" placeholder="Mínimo 3 caracteres">
+                </div>
+                <div class="form-group">
+                    <label for="reg-password">Contraseña</label>
+                    <input type="password" id="reg-password" placeholder="Mínimo 4 caracteres">
+                </div>
+                <div class="form-group">
+                    <label for="reg-confirm">Confirmar Contraseña</label>
+                    <input type="password" id="reg-confirm" placeholder="Repite la contraseña">
+                </div>
+                <button id="btn-do-register" class="btn-primary">Registrarse</button>
+            </div>
+
+            <div class="encryption-badge">
+                <span>🔒</span>
+                <span>Credenciales cifradas con AES-256 en tránsito</span>
+            </div>
+
+            <div id="auth-error" class="auth-feedback auth-error"></div>
+            <div id="auth-success" class="auth-feedback auth-success"></div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/crypto.js"></script>
+    <script src="js/rpc.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
