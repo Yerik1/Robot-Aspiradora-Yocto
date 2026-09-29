@@ -1,7 +1,7 @@
 SUMMARY = "librobot: API de hardware del Robot Aspiradora"
 LICENSE = "CLOSED"
 
-SRC_URI = "git://github.com/Yerik1/Robot-Aspiradora-Yocto.git;protocol=https;branch=develop"
+SRC_URI = "git://github.com/Yerik1/Robot-Aspiradora-Yocto.git;protocol=https;branch=dev"
 SRCREV = "${AUTOREV}"
 S = "${WORKDIR}/git/librobot"
 
