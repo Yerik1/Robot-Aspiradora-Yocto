@@ -145,6 +145,23 @@ function setupUI() {
             appendLog('WS', 'Connected to robot server', 'success');
             // Fetch initial map
             rpc.call('map.get').then(handleFullMap).catch(console.error);
+            // Load available songs into playlist
+            rpc.call('audio.list_files').then(files => {
+                const sel = E('audio-playlist');
+                sel.innerHTML = '';
+                files.forEach(f => {
+                    const opt = document.createElement('option');
+                    opt.value = f;
+                    opt.textContent = f;
+                    sel.appendChild(opt);
+                });
+                
+                if (files.length > 0) {
+                    E('audio-track-display').textContent = `${files[0]} (STOPPED)`;
+                } else {
+                    E('audio-track-display').textContent = 'No hay canciones';
+                }
+            }).catch(console.error);
         } else if (status === 'connecting') {
             badge.className = 'status-badge connecting';
             badge.textContent = 'CONNECTING...';
@@ -411,17 +428,6 @@ function setupUI() {
         E('event-log').innerHTML = '';
     };
 
-    // Load available songs into playlist
-    rpc.call('audio.list_files').then(files => {
-        const sel = E('audio-playlist');
-        sel.innerHTML = '';
-        files.forEach(f => {
-            const opt = document.createElement('option');
-            opt.value = f;
-            opt.textContent = f;
-            sel.appendChild(opt);
-        });
-    }).catch(console.error);
 }
 
 function setRobotMode(mode) {

@@ -118,7 +118,7 @@ void sim_robot_init(void) {
 
     /* Audio */
     s_robot.audio_state = SIM_AUDIO_STOPPED;
-    snprintf(s_robot.current_track, sizeof(s_robot.current_track), "ambient_chill.mp3");
+    s_robot.current_track[0] = '\0';
     s_robot.volume_percent = 70;
 
     /* Initial sensors */
@@ -204,12 +204,19 @@ bool sim_robot_set_vacuum(bool on) {
     return true;
 }
 
+#include <stdlib.h>
+
 bool sim_robot_audio_play(const char *track) {
     s_robot.audio_state = SIM_AUDIO_PLAYING;
     if (track && strlen(track) > 0) {
         snprintf(s_robot.current_track, sizeof(s_robot.current_track), "%s", track);
     }
     printf("\033[35m[AUDIO]\033[0m Playing: %s (vol: %d%%)\n", s_robot.current_track, s_robot.volume_percent);
+    
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "killall -9 mpg123 2>/dev/null; mpg123 'music/%s' >/tmp/mpg123_log.txt 2>&1 &", s_robot.current_track);
+    int ret = system(cmd);
+    (void)ret;
     return true;
 }
 
@@ -217,6 +224,8 @@ bool sim_robot_audio_pause(void) {
     if (s_robot.audio_state == SIM_AUDIO_PLAYING) {
         s_robot.audio_state = SIM_AUDIO_PAUSED;
         printf("\033[35m[AUDIO]\033[0m Paused playback.\n");
+        int ret = system("killall -STOP mpg123 2>/dev/null");
+        (void)ret;
         return true;
     }
     return false;
@@ -226,6 +235,8 @@ bool sim_robot_audio_resume(void) {
     if (s_robot.audio_state == SIM_AUDIO_PAUSED) {
         s_robot.audio_state = SIM_AUDIO_PLAYING;
         printf("\033[35m[AUDIO]\033[0m Resumed playback.\n");
+        int ret = system("killall -CONT mpg123 2>/dev/null");
+        (void)ret;
         return true;
     }
     return false;
@@ -234,6 +245,8 @@ bool sim_robot_audio_resume(void) {
 bool sim_robot_audio_stop(void) {
     s_robot.audio_state = SIM_AUDIO_STOPPED;
     printf("\033[35m[AUDIO]\033[0m Stopped audio playback.\n");
+    int ret = system("killall -9 mpg123 2>/dev/null");
+    (void)ret;
     return true;
 }
 

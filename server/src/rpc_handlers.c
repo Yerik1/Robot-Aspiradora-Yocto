@@ -175,7 +175,7 @@ static void rpc_robot_vacuum(struct mg_rpc_req *r) {
 
 static void rpc_audio_play(struct mg_rpc_req *r) {
     char *file = mg_json_get_str(r->frame, "$.params.file");
-    sim_robot_audio_play(file ? file : "ambient_chill.mp3");
+    sim_robot_audio_play(file ? file : "");
     if (file) free(file);
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
@@ -211,12 +211,46 @@ static void rpc_audio_notification(struct mg_rpc_req *r) {
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
+#include <dirent.h>
+
 static void rpc_audio_list_files(struct mg_rpc_req *r) {
-    mg_rpc_ok(r, "[%m,%m,%m,%m]",
-              MG_ESC("ambient_chill.mp3"),
-              MG_ESC("cyber_beat.mp3"),
-              MG_ESC("retro_wave.mp3"),
-              MG_ESC("smooth_jazz.mp3"));
+    struct dirent *de;
+    DIR *dr = opendir("music");
+    
+    struct mg_iobuf io = {0, 0, 0, 256};
+    mg_iobuf_init(&io, 1024, 256);
+    mg_iobuf_add(&io, io.len, "[", 1);
+    
+    bool first = true;
+    if (dr != NULL) {
+        while ((de = readdir(dr)) != NULL) {
+            // Check if file ends with .mp3
+            size_t len = strlen(de->d_name);
+            if (len > 4 && strcasecmp(de->d_name + len - 4, ".mp3") == 0) {
+                if (!first) {
+                    mg_iobuf_add(&io, io.len, ",", 1);
+                }
+                mg_iobuf_add(&io, io.len, "\"", 1);
+                mg_iobuf_add(&io, io.len, de->d_name, strlen(de->d_name));
+                mg_iobuf_add(&io, io.len, "\"", 1);
+                first = false;
+            }
+        }
+        closedir(dr);
+    }
+    
+    mg_iobuf_add(&io, io.len, "]", 1);
+    
+    /* Create an outer JSON array wrapper manually since mg_rpc_ok wraps in {"result": ...} */
+    /* Wait, mg_rpc_ok wraps the result automatically, so if we pass raw JSON, we must use %.*s or %M? 
+       Actually mg_rpc_ok uses mg_json_out. But let's just use mg_rpc_ok with a wrapper object or directly use mg_io_send if needed.
+       Wait, looking at rpc_map_get, they used %.*s to print the json array inside the object. So we can do: */
+    
+    // Ensure null-termination just in case
+    mg_iobuf_add(&io, io.len, "\0", 1);
+    
+    mg_rpc_ok(r, "%.*s", (int)(io.len - 1), io.buf);
+    mg_iobuf_free(&io);
 }
 
 static void rpc_map_get(struct mg_rpc_req *r) {
