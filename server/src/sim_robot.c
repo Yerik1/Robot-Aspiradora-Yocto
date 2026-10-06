@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -206,19 +213,71 @@ bool sim_robot_set_vacuum(bool on) {
 
 #include <stdlib.h>
 
+/* ==========================================================================
+ * Audio: dos "canales"
+ *  - MÚSICA: un proceso persistente `mpg123 -R` (s_audio_pipe) controlado
+ *    por comandos de texto (LOAD/PAUSE/STOP/V).
+ *  - NOTIFICACIÓN: un proceso corto `mpg123 -q SoundEffects/<x>.mp3`
+ *    lanzado con fork+exec (no bloquea el loop de mongoose).
+ * Mientras suena una notificación la música se ATENÚA (ducking) a
+ * NOTIF_DUCK_PERCENT de su volumen y se restaura cuando la notificación
+ * termina (detectado con waitpid(WNOHANG) desde sim_robot_tick()).
+ * ========================================================================== */
+
+#define NOTIF_DIR            "SoundEffects"
+#define NOTIF_DUCK_PERCENT   25    /* % del volumen del usuario durante la notificación */
+#define NOTIF_COOLDOWN_SEC   1.0   /* tiempo mínimo entre dos notificaciones del mismo evento */
+
 static FILE *s_audio_pipe = NULL;
+static pid_t s_notif_pid = -1;          /* proceso de la notificación en curso */
+static bool s_music_ducked = false;     /* música atenuada por una notificación */
+static double s_last_notif_time[NOTIF_MANUAL_MODE + 1];
+
+static const char *s_notif_files[] = {
+    [NOTIF_SYSTEM_START] = NOTIF_DIR "/inicio.mp3",
+    [NOTIF_AUTO_START]   = NOTIF_DIR "/modoautomatico.mp3",
+    [NOTIF_OBSTACLE]     = NOTIF_DIR "/obstaculo.mp3",
+    [NOTIF_MANUAL_MODE]  = NOTIF_DIR "/modomanual.mp3",
+};
+
+static double monotonic_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Volumen que realmente debe tener el canal de música ahora mismo. */
+static int music_effective_volume(void) {
+    if (s_music_ducked) {
+        return (int)s_robot.volume_percent * NOTIF_DUCK_PERCENT / 100;
+    }
+    return (int)s_robot.volume_percent;
+}
 
 static void ensure_audio_pipe(void) {
     if (!s_audio_pipe) {
+        /* Si mpg123 muere, escribir al pipe no debe matar al servidor. */
+        signal(SIGPIPE, SIG_IGN);
         /* Redirigir stdout y stderr a /dev/null para evitar que mpg123 contamine los logs */
         s_audio_pipe = popen("mpg123 -R >/dev/null 2>&1", "w");
         if (s_audio_pipe) {
+            /* Que los procesos de notificación (fork+exec) no hereden el pipe */
+            fcntl(fileno(s_audio_pipe), F_SETFD, FD_CLOEXEC);
             /* Initial volume setting */
-            fprintf(s_audio_pipe, "V %d\n", s_robot.volume_percent);
+            fprintf(s_audio_pipe, "V %d\n", music_effective_volume());
             fflush(s_audio_pipe);
         }
     }
 }
+
+static void music_send_volume(void) {
+    ensure_audio_pipe();
+    if (s_audio_pipe) {
+        fprintf(s_audio_pipe, "V %d\n", music_effective_volume());
+        fflush(s_audio_pipe);
+    }
+}
+
 
 bool sim_robot_audio_play(const char *track) {
     s_robot.audio_state = SIM_AUDIO_PLAYING;
@@ -280,15 +339,42 @@ bool sim_robot_audio_stop(void) {
 bool sim_robot_audio_set_volume(uint8_t volume) {
     if (volume > 100) volume = 100;
     s_robot.volume_percent = volume;
-    printf("\033[35m[AUDIO]\033[0m Volume set to %d%%\n", volume);
-    
-    ensure_audio_pipe();
-    if (s_audio_pipe) {
-        fprintf(s_audio_pipe, "V %d\n", volume);
-        fflush(s_audio_pipe);
-    }
-    
+    printf("\033[35m[AUDIO]\033[0m Volume set to %d%%%s\n", volume,
+           s_music_ducked ? " (applied after notification)" : "");
+
+    /* Si hay una notificación sonando, la música sigue atenuada respecto
+     * al nuevo volumen; se restaurará completo al terminar. */
+    music_send_volume();
+
     return true;
+}
+
+/* Termina y recoge el proceso de notificación en curso (si existe). */
+static void notif_kill_current(void) {
+    if (s_notif_pid > 0) {
+        kill(s_notif_pid, SIGTERM);
+        waitpid(s_notif_pid, NULL, 0);
+        s_notif_pid = -1;
+    }
+}
+
+/* Lanza `mpg123 -q <file>` como proceso hijo sin bloquear. */
+static pid_t notif_spawn(const char *file) {
+    pid_t pid = fork();
+    if (pid != 0) return pid; /* padre (o -1 si fork falló) */
+
+    /* Hijo: silenciar E/S y no heredar sockets de mongoose */
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO) close(devnull);
+    }
+    for (int fd = 3; fd < 1024; fd++) close(fd);
+
+    execlp("mpg123", "mpg123", "-q", file, (char *)NULL);
+    _exit(127); /* execlp falló */
 }
 
 bool sim_robot_audio_play_notification(notif_event_t event) {
@@ -298,11 +384,71 @@ bool sim_robot_audio_play_notification(notif_event_t event) {
         "Obstacle Detected Alert",
         "Switch to Manual Mode"
     };
-    if (event <= NOTIF_MANUAL_MODE) {
-        printf("\033[35m[AUDIO NOTIF]\033[0m Played notification sound: %s\n", names[event]);
-        return true;
+    if ((int)event < NOTIF_SYSTEM_START || event > NOTIF_MANUAL_MODE) {
+        return false;
     }
-    return false;
+
+    /* Cooldown por evento: evita repetir la alerta de obstáculo sin parar
+     * mientras el robot rebota. */
+    double now = monotonic_now();
+    if (s_last_notif_time[event] > 0.0 &&
+        now - s_last_notif_time[event] < NOTIF_COOLDOWN_SEC) {
+        printf("\033[35m[AUDIO NOTIF]\033[0m Skipped (cooldown): %s\n", names[event]);
+        return false;
+    }
+
+    const char *file = s_notif_files[event];
+    if (access(file, R_OK) != 0) {
+        printf("\033[31m[AUDIO NOTIF]\033[0m File not found: %s (run the server from server/)\n", file);
+        return false;
+    }
+    s_last_notif_time[event] = now;
+
+    /* La notificación más reciente gana: se corta la anterior (la música
+     * permanece atenuada, no hay "salto" de volumen entre ambas). */
+    notif_kill_current();
+
+    /* Atenuar la música solo si realmente está sonando */
+    if (s_robot.audio_state == SIM_AUDIO_PLAYING && !s_music_ducked) {
+        s_music_ducked = true;
+        music_send_volume();
+    }
+
+    s_notif_pid = notif_spawn(file);
+    if (s_notif_pid < 0) {
+        printf("\033[31m[AUDIO NOTIF]\033[0m fork() failed: %s\n", strerror(errno));
+        sim_robot_audio_service(); /* restaura el volumen de la música */
+        return false;
+    }
+
+    printf("\033[35m[AUDIO NOTIF]\033[0m Playing notification: %s (%s)%s\n",
+           names[event], file, s_music_ducked ? " - music ducked" : "");
+    return true;
+}
+
+void sim_robot_audio_service(void) {
+    if (s_notif_pid > 0) {
+        pid_t r = waitpid(s_notif_pid, NULL, WNOHANG);
+        if (r == 0) return;           /* la notificación sigue sonando */
+        s_notif_pid = -1;             /* terminó (r == pid) o ya no existe (r < 0) */
+    }
+    if (s_music_ducked) {
+        s_music_ducked = false;
+        music_send_volume();
+        printf("\033[35m[AUDIO NOTIF]\033[0m Notification finished - music volume restored to %d%%\n",
+               s_robot.volume_percent);
+    }
+}
+
+void sim_robot_audio_shutdown(void) {
+    notif_kill_current();
+    s_music_ducked = false;
+    if (s_audio_pipe) {
+        fprintf(s_audio_pipe, "QUIT\n");
+        fflush(s_audio_pipe);
+        pclose(s_audio_pipe);
+        s_audio_pipe = NULL;
+    }
 }
 
 void sim_robot_map_reset(void) {
@@ -313,6 +459,9 @@ void sim_robot_map_reset(void) {
 }
 
 void sim_robot_tick(double dt_seconds) {
+    /* ¿Terminó la notificación en curso? -> restaurar volumen de la música */
+    sim_robot_audio_service();
+
     /* Reset update count for this tick */
     s_robot.update_count = 0;
 

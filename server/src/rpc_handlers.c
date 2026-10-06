@@ -205,10 +205,16 @@ static void rpc_audio_volume(struct mg_rpc_req *r) {
 }
 
 static void rpc_audio_notification(struct mg_rpc_req *r) {
-    double evt = 0.0;
+    double evt = -1.0;
     mg_json_get_num(r->frame, "$.params.event", &evt);
-    sim_robot_audio_play_notification((notif_event_t)(int)evt);
-    mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
+    if (evt < NOTIF_SYSTEM_START || evt > NOTIF_MANUAL_MODE) {
+        mg_rpc_err(r, 400, "%m", MG_ESC("Invalid notification event (0-3)"));
+        return;
+    }
+    bool played = sim_robot_audio_play_notification((notif_event_t)(int)evt);
+    /* success=true aunque se omita por cooldown: no es un error */
+    mg_rpc_ok(r, "{%m:true,%m:%s}", MG_ESC("success"),
+              MG_ESC("played"), played ? "true" : "false");
 }
 
 #include <dirent.h>

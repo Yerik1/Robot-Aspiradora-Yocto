@@ -234,6 +234,9 @@ int main(int argc, char *argv[]) {
     sim_robot_init();
     rpc_handlers_init(&s_rpc_head);
 
+    /* Audible feedback: system startup */
+    sim_robot_audio_play_notification(NOTIF_SYSTEM_START);
+
     /* Add 5 Hz simulation and telemetry timer (every 200 ms) */
     mg_timer_add(&mgr, 200, MG_TIMER_REPEAT, timer_tick, &mgr);
 
@@ -259,6 +262,7 @@ int main(int argc, char *argv[]) {
     printf("\n\033[33m[SHUTDOWN]\033[0m Shutting down server gracefully...\n");
     mg_mgr_free(&mgr);
     mg_rpc_del(&s_rpc_head, NULL);
+    sim_robot_audio_shutdown();
     auth_cleanup();
 
     printf("\033[32m[SHUTDOWN]\033[0m Clean exit.\n");

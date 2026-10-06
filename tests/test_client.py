@@ -228,7 +228,13 @@ def run_tests():
         # Notification sound event 2 (Obstacle detected)
         res = client.call_rpc(11, "audio.notification", {"event": 2})
         assert res["result"]["success"] is True
+        assert "played" in res["result"]
         print("  ✓ audio.notification (Event 2 - Obstacle) succeeded")
+
+        # Invalid event id must be rejected
+        res = client.call_rpc(111, "audio.notification", {"event": 99})
+        assert "error" in res
+        print("  ✓ audio.notification (invalid event 99) rejected")
     except Exception as e:
         print(f"  ✗ Audio controls failed: {e}")
         client.close()

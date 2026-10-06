@@ -466,9 +466,13 @@ function sendMove(direction) {
 }
 
 function triggerNotif(eventId, name) {
-    rpc.call('audio.notification', { event: eventId }).then(() => {
-        appendLog('AUDIO NOTIF', `Sound played: ${name}`, 'success');
-    }).catch(console.error);
+    rpc.call('audio.notification', { event: eventId }).then((res) => {
+        if (res && res.played === false) {
+            appendLog('AUDIO NOTIF', `Skipped (cooldown 1 s): ${name}`, 'info');
+        } else {
+            appendLog('AUDIO NOTIF', `Sound played: ${name}`, 'success');
+        }
+    }).catch(err => appendLog('AUDIO NOTIF', err.message || String(err), 'error'));
 }
 
 function handleFullMap(data) {

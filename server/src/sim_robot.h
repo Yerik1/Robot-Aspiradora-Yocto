@@ -114,6 +114,18 @@ bool sim_robot_audio_set_volume(uint8_t volume);
 bool sim_robot_audio_play_notification(notif_event_t event);
 
 /**
+ * Notification channel housekeeping: detects (non-blocking) when the current
+ * notification sound has finished and restores the music volume (ducking).
+ * Called from sim_robot_tick().
+ */
+void sim_robot_audio_service(void);
+
+/**
+ * Stops the notification process and the music player (on server shutdown).
+ */
+void sim_robot_audio_shutdown(void);
+
+/**
  * Map API
  */
 void sim_robot_map_reset(void);
