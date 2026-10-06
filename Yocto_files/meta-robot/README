@@ -1,0 +1,31 @@
+meta-robot
+==========
+
+Capa Yocto propia del proyecto Robot Aspiradora Autónomo (CE-1113, TEC).
+Contiene las recetas del software del robot, separadas de las capas
+oficiales de Poky y meta-raspberrypi.
+
+Compatibilidad
+--------------
+
+  Yocto Project: scarthgap (5.0)
+  MACHINE: raspberrypi4
+
+Dependencias
+------------
+
+  URI: https://git.yoctoproject.org/poky
+  capa: meta (core)
+  branch: scarthgap
+
+Agregar la capa al build
+------------------------
+
+  source oe-init-build-env rpi4
+  bitbake-layers add-layer ../meta-robot
+  bitbake-layers show-layers
+
+Mantenimiento
+-------------
+
+  Repositorio: https://github.com/Yerik1/Robot-Aspiradora-Yocto
