@@ -43,6 +43,8 @@
 #include <dirent.h>
 #include <time.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include "../include/librobot.h"
@@ -53,15 +55,24 @@
  * uno fijo para los 4 sonidos de notificación obligatorios, y otro para
  * la lista de reproducción de música de fondo que expone
  * audio_list_files(). Ajustar aquí si la convención final es otra. */
-#define AUDIO_NOTIFICATION_DIR "/usr/share/robot-aspirador/audio"
-#define AUDIO_MUSIC_DIR        "/usr/share/robot-aspirador/music"
+#define AUDIO_NOTIFICATION_DIR "/usr/share/robot-server/server/SoundEffects"
+#define AUDIO_MUSIC_DIR        "/usr/share/robot-server/server/music"
 
+/* Nombres reales de los archivos en server/SoundEffects/ (se instalan en
+ * AUDIO_NOTIFICATION_DIR desde la receta de Yocto). */
 static const char *g_notification_files[] = {
-    [AUDIO_EVENT_SYSTEM_START]     = AUDIO_NOTIFICATION_DIR "/system_start.mp3",
-    [AUDIO_EVENT_AUTONOMOUS_START] = AUDIO_NOTIFICATION_DIR "/autonomous_start.mp3",
-    [AUDIO_EVENT_OBSTACLE]         = AUDIO_NOTIFICATION_DIR "/obstacle.mp3",
-    [AUDIO_EVENT_MANUAL_MODE]      = AUDIO_NOTIFICATION_DIR "/manual_mode.mp3",
+    [AUDIO_EVENT_SYSTEM_START]     = AUDIO_NOTIFICATION_DIR "/inicio.mp3",
+    [AUDIO_EVENT_AUTONOMOUS_START] = AUDIO_NOTIFICATION_DIR "/modoautomatico.mp3",
+    [AUDIO_EVENT_OBSTACLE]         = AUDIO_NOTIFICATION_DIR "/obstaculo.mp3",
+    [AUDIO_EVENT_MANUAL_MODE]      = AUDIO_NOTIFICATION_DIR "/modomanual.mp3",
 };
+
+/* Canal de notificaciones (ver audio_play_notification()):
+ * la notificación suena en un proceso `mpg123 -q` propio mientras la
+ * música (proceso `mpg123 -R` persistente) se atenúa al
+ * AUDIO_DUCK_PERCENT de su volumen; al terminar se restaura. */
+#define AUDIO_DUCK_PERCENT      25    /* % del volumen del usuario durante la notificación */
+#define AUDIO_NOTIF_COOLDOWN_S  1.0   /* mínimo entre dos notificaciones del mismo evento */
 
 static pthread_mutex_t g_audio_lock = PTHREAD_MUTEX_INITIALIZER;
 static pid_t g_mpg123_pid = -1;
@@ -69,6 +80,10 @@ static int g_mpg123_stdin_fd = -1;
 static audio_state_t g_audio_state = AUDIO_STOPPED;
 static uint8_t g_audio_volume = 80; /* valor inicial razonable; ASUNCIÓN A VERIFICAR */
 static char g_current_file[256] = {0};
+
+static pid_t g_notif_pid = -1;        /* proceso de la notificación en curso */
+static bool g_music_ducked = false;   /* música atenuada por una notificación */
+static double g_last_notif_time[AUDIO_EVENT_MANUAL_MODE + 1];
 
 /** Escribe una línea de comando en el pipe hacia mpg123 -R. `cmd` debe
  *  terminar en '\n'. No bloquea salvo que el pipe esté lleno (buffer del
@@ -84,6 +99,26 @@ static robot_status_t send_command(const char *cmd)
         return ROBOT_ERR_AUDIO;
     }
     return ROBOT_OK;
+}
+
+/** Envía a la música el volumen que corresponde ahora mismo (atenuado si
+ *  hay una notificación sonando). Llamar con g_audio_lock tomado. */
+static robot_status_t send_music_volume_locked(void)
+{
+    unsigned vol = g_audio_volume;
+    if (g_music_ducked) {
+        vol = vol * AUDIO_DUCK_PERCENT / 100;
+    }
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "VOLUME %u\n", vol);
+    return send_command(cmd);
+}
+
+static double monotonic_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
 /* ==========================================================================
@@ -117,13 +152,118 @@ robot_status_t audio_play_file(const char *filepath)
     return status;
 }
 
+/** Hilo desacoplado que espera a que termine UNA notificación y, si sigue
+ *  siendo la notificación vigente, restaura el volumen de la música. Se
+ *  usa un hilo porque la biblioteca no tiene un "tick" propio desde el
+ *  cual hacer waitpid(WNOHANG). */
+static void *notification_waiter(void *arg)
+{
+    pid_t pid = (pid_t)(intptr_t)arg;
+    waitpid(pid, NULL, 0); /* bloquea solo a este hilo */
+
+    pthread_mutex_lock(&g_audio_lock);
+    if (g_notif_pid == pid) {
+        g_notif_pid = -1;
+        if (g_music_ducked) {
+            g_music_ducked = false;
+            send_music_volume_locked();
+        }
+    }
+    /* Si g_notif_pid != pid, la notificación fue reemplazada por otra más
+     * reciente: esa otra se encargará de restaurar el volumen. */
+    pthread_mutex_unlock(&g_audio_lock);
+    return NULL;
+}
+
+/** fork+exec de `mpg123 -q <file>` sin bloquear. Devuelve el pid o -1. */
+static pid_t spawn_notification(const char *file)
+{
+    pid_t pid = fork();
+    if (pid != 0) return pid; /* padre, o -1 si fork falló */
+
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO) close(devnull);
+    }
+    /* No heredar sockets del servidor ni el pipe hacia la música */
+    for (int fd = 3; fd < 1024; fd++) close(fd);
+
+    execlp("mpg123", "mpg123", "-q", file, (char *)NULL);
+    _exit(127);
+}
+
+/**
+ * Reproduce la notificación SIN interrumpir la música:
+ *  1. Cooldown de AUDIO_NOTIF_COOLDOWN_S por evento (devuelve ROBOT_OK sin
+ *     sonar si aún no pasa, p.ej. alertas de obstáculo repetidas).
+ *  2. Si ya suena otra notificación, se corta (gana la más reciente).
+ *  3. Si la música está sonando se atenúa (ducking).
+ *  4. Se lanza un `mpg123 -q` aparte y un hilo que espera su fin para
+ *     restaurar el volumen.
+ * Requiere que ALSA permita dos streams simultáneos (dmix / PipeWire).
+ */
 robot_status_t audio_play_notification(audio_event_t event)
 {
     if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
     if (event < AUDIO_EVENT_SYSTEM_START || event > AUDIO_EVENT_MANUAL_MODE) {
         return ROBOT_ERR_INVALID_PARAM;
     }
-    return audio_play_file(g_notification_files[event]);
+
+    const char *file = g_notification_files[event];
+    if (access(file, R_OK) != 0) {
+        return ROBOT_ERR_AUDIO_FILE_NOT_FOUND;
+    }
+
+    pthread_mutex_lock(&g_audio_lock);
+
+    double now = monotonic_now();
+    if (g_last_notif_time[event] > 0.0 &&
+        now - g_last_notif_time[event] < AUDIO_NOTIF_COOLDOWN_S) {
+        pthread_mutex_unlock(&g_audio_lock);
+        return ROBOT_OK; /* omitida por cooldown: no es un error */
+    }
+    g_last_notif_time[event] = now;
+
+    if (g_notif_pid > 0) {
+        /* Su hilo waiter lo recogerá; al ver que ya no es la vigente no
+         * tocará el volumen. */
+        kill(g_notif_pid, SIGTERM);
+        g_notif_pid = -1;
+    }
+
+    if (g_audio_state == AUDIO_PLAYING && !g_music_ducked) {
+        g_music_ducked = true;
+        send_music_volume_locked();
+    }
+
+    robot_status_t status = ROBOT_OK;
+    pid_t pid = spawn_notification(file);
+    if (pid < 0) {
+        status = ROBOT_ERR_AUDIO;
+    } else {
+        g_notif_pid = pid;
+        pthread_t th;
+        if (pthread_create(&th, NULL, notification_waiter, (void *)(intptr_t)pid) == 0) {
+            pthread_detach(th);
+        } else {
+            /* Sin hilo no habría quién restaure: se cancela la notificación */
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            g_notif_pid = -1;
+            status = ROBOT_ERR_AUDIO;
+        }
+    }
+
+    if (status != ROBOT_OK && g_music_ducked) {
+        g_music_ducked = false;
+        send_music_volume_locked();
+    }
+
+    pthread_mutex_unlock(&g_audio_lock);
+    return status;
 }
 
 robot_status_t audio_pause(void)
@@ -179,12 +319,13 @@ robot_status_t audio_set_volume(uint8_t volume_percent)
     if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
     if (volume_percent > 100) return ROBOT_ERR_INVALID_PARAM;
 
-    char cmd[32];
-    snprintf(cmd, sizeof(cmd), "VOLUME %u\n", (unsigned)volume_percent);
-
     pthread_mutex_lock(&g_audio_lock);
-    robot_status_t status = send_command(cmd);
-    if (status == ROBOT_OK) g_audio_volume = volume_percent;
+    uint8_t previous = g_audio_volume;
+    g_audio_volume = volume_percent;
+    /* Si hay notificación sonando se manda el valor atenuado; el volumen
+     * completo se restaura cuando termina la notificación. */
+    robot_status_t status = send_music_volume_locked();
+    if (status != ROBOT_OK) g_audio_volume = previous;
     pthread_mutex_unlock(&g_audio_lock);
 
     return status;
@@ -289,11 +430,17 @@ robot_status_t audio_module_init(void)
 
     /* Proceso padre */
     close(pipefd[0]);
+    /* Que otros procesos lanzados después (p.ej. notificaciones) no
+     * hereden el extremo de escritura del pipe hacia la música. */
+    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
     g_mpg123_stdin_fd = pipefd[1];
     g_mpg123_pid = pid;
     g_audio_state = AUDIO_STOPPED;
     g_audio_volume = 80;
     g_current_file[0] = '\0';
+    g_notif_pid = -1;
+    g_music_ducked = false;
+    memset(g_last_notif_time, 0, sizeof(g_last_notif_time));
 
     return ROBOT_OK;
 }
@@ -305,6 +452,16 @@ robot_status_t audio_module_init(void)
  */
 void audio_module_cleanup(void)
 {
+    /* Cortar la notificación en curso. Su hilo waiter la recoge con
+     * waitpid() y, al ver g_notif_pid == -1, no toca nada más. */
+    pthread_mutex_lock(&g_audio_lock);
+    if (g_notif_pid > 0) {
+        kill(g_notif_pid, SIGTERM);
+        g_notif_pid = -1;
+    }
+    g_music_ducked = false;
+    pthread_mutex_unlock(&g_audio_lock);
+
     if (g_mpg123_stdin_fd >= 0) {
         write(g_mpg123_stdin_fd, "QUIT\n", 5); /* best-effort, se ignora error */
         close(g_mpg123_stdin_fd);

@@ -173,7 +173,12 @@ typedef enum {
 /** Reproduce un archivo MP3 específico (ruta absoluta o relativa al rootfs). */
 robot_status_t audio_play_file(const char *filepath);
 
-/** Reproduce el sonido corto de notificación asociado al evento. */
+/**
+ * Reproduce el sonido corto de notificación asociado al evento SIN
+ * interrumpir la música: la música se atenúa mientras suena la
+ * notificación (proceso mpg123 aparte) y se restaura al terminar.
+ * Cooldown de 1 s por evento (si no ha pasado, devuelve ROBOT_OK sin sonar).
+ */
 robot_status_t audio_play_notification(audio_event_t event);
 
 robot_status_t audio_pause(void);

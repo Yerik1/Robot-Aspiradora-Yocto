@@ -33,6 +33,8 @@ target_link_libraries(robot PUBLIC ${PIGPIO_LIB} pthread)
 set_target_properties(robot PROPERTIES
     PUBLIC_HEADER include/librobot.h
     OUTPUT_NAME robot
+    VERSION 0.1.0
+    SOVERSION 0
 )
 
 # audio.c invoca "mpg123" como proceso externo (fork+exec), no lo enlaza
@@ -58,3 +60,7 @@ set(CPACK_SOURCE_IGNORE_FILES
     "\\\\.gitignore"
 )
 include(CPack)
+
+add_executable(robot-selftest tests/robot_selftest.c)
+target_link_libraries(robot-selftest robot)
+install(TARGETS robot-selftest RUNTIME DESTINATION bin)
