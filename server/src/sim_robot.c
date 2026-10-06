@@ -206,17 +206,32 @@ bool sim_robot_set_vacuum(bool on) {
 
 #include <stdlib.h>
 
+static FILE *s_audio_pipe = NULL;
+
+static void ensure_audio_pipe(void) {
+    if (!s_audio_pipe) {
+        /* Redirigir stdout y stderr a /dev/null para evitar que mpg123 contamine los logs */
+        s_audio_pipe = popen("mpg123 -R >/dev/null 2>&1", "w");
+        if (s_audio_pipe) {
+            /* Initial volume setting */
+            fprintf(s_audio_pipe, "V %d\n", s_robot.volume_percent);
+            fflush(s_audio_pipe);
+        }
+    }
+}
+
 bool sim_robot_audio_play(const char *track) {
     s_robot.audio_state = SIM_AUDIO_PLAYING;
-    if (track && strlen(track) > 0) {
+    if (track && strlen(track) > 0 && track != s_robot.current_track) {
         snprintf(s_robot.current_track, sizeof(s_robot.current_track), "%s", track);
     }
     printf("\033[35m[AUDIO]\033[0m Playing: %s (vol: %d%%)\n", s_robot.current_track, s_robot.volume_percent);
     
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "killall -9 mpg123 2>/dev/null; mpg123 'music/%s' >/tmp/mpg123_log.txt 2>&1 &", s_robot.current_track);
-    int ret = system(cmd);
-    (void)ret;
+    ensure_audio_pipe();
+    if (s_audio_pipe) {
+        fprintf(s_audio_pipe, "LOAD music/%s\n", s_robot.current_track);
+        fflush(s_audio_pipe);
+    }
     return true;
 }
 
@@ -224,8 +239,11 @@ bool sim_robot_audio_pause(void) {
     if (s_robot.audio_state == SIM_AUDIO_PLAYING) {
         s_robot.audio_state = SIM_AUDIO_PAUSED;
         printf("\033[35m[AUDIO]\033[0m Paused playback.\n");
-        int ret = system("killall -STOP mpg123 2>/dev/null");
-        (void)ret;
+        ensure_audio_pipe();
+        if (s_audio_pipe) {
+            fprintf(s_audio_pipe, "PAUSE\n");
+            fflush(s_audio_pipe);
+        }
         return true;
     }
     return false;
@@ -235,9 +253,15 @@ bool sim_robot_audio_resume(void) {
     if (s_robot.audio_state == SIM_AUDIO_PAUSED) {
         s_robot.audio_state = SIM_AUDIO_PLAYING;
         printf("\033[35m[AUDIO]\033[0m Resumed playback.\n");
-        int ret = system("killall -CONT mpg123 2>/dev/null");
-        (void)ret;
+        ensure_audio_pipe();
+        if (s_audio_pipe) {
+            fprintf(s_audio_pipe, "PAUSE\n"); /* PAUSE in mpg123 -R toggles pause state */
+            fflush(s_audio_pipe);
+        }
         return true;
+    } else if (s_robot.audio_state == SIM_AUDIO_STOPPED) {
+        /* If stopped, resume acts like play for convenience */
+        return sim_robot_audio_play(s_robot.current_track);
     }
     return false;
 }
@@ -245,8 +269,11 @@ bool sim_robot_audio_resume(void) {
 bool sim_robot_audio_stop(void) {
     s_robot.audio_state = SIM_AUDIO_STOPPED;
     printf("\033[35m[AUDIO]\033[0m Stopped audio playback.\n");
-    int ret = system("killall -9 mpg123 2>/dev/null");
-    (void)ret;
+    ensure_audio_pipe();
+    if (s_audio_pipe) {
+        fprintf(s_audio_pipe, "STOP\n");
+        fflush(s_audio_pipe);
+    }
     return true;
 }
 
@@ -254,6 +281,13 @@ bool sim_robot_audio_set_volume(uint8_t volume) {
     if (volume > 100) volume = 100;
     s_robot.volume_percent = volume;
     printf("\033[35m[AUDIO]\033[0m Volume set to %d%%\n", volume);
+    
+    ensure_audio_pipe();
+    if (s_audio_pipe) {
+        fprintf(s_audio_pipe, "V %d\n", volume);
+        fflush(s_audio_pipe);
+    }
+    
     return true;
 }
 
