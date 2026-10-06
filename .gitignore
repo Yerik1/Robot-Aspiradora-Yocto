@@ -58,4 +58,5 @@ nunit-*.xml
 *.so
 server/robot-server
 users.db
-/tmp/server_test.log
+/tmp/server_test.logusers.db
+build/

@@ -1,0 +1,14 @@
+[Unit]
+Description=Robot Aspiradora Web Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/robot-server -r /usr/share/robot-server/client -d /var/lib/robot-server/users.db
+WorkingDirectory=/usr/share/robot-server
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

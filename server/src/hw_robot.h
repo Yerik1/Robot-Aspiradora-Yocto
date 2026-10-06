@@ -1,5 +1,5 @@
-#ifndef SIM_ROBOT_H
-#define SIM_ROBOT_H
+#ifndef HW_ROBOT_H
+#define HW_ROBOT_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -83,51 +83,51 @@ typedef struct {
 /**
  * Initializes the simulated robot state, generates map layout with simulated obstacles.
  */
-void sim_robot_init(void);
+void hw_robot_init(void);
 
 /**
  * Advances the simulation by dt seconds (called from Mongoose timer).
  */
-void sim_robot_tick(double dt_seconds);
+void hw_robot_tick(double dt_seconds);
 
 /**
  * Access the global robot state.
  */
-robot_state_t *sim_robot_get_state(void);
+robot_state_t *hw_robot_get_state(void);
 
 /**
  * Control API
  */
-bool sim_robot_set_mode(robot_mode_t mode);
-bool sim_robot_move(const char *direction, uint8_t speed, uint8_t radius);
-bool sim_robot_stop(void);
-bool sim_robot_set_vacuum(bool on);
+bool hw_robot_set_mode(robot_mode_t mode);
+bool hw_robot_move(const char *direction, uint8_t speed, uint8_t radius);
+bool hw_robot_stop(void);
+bool hw_robot_set_vacuum(bool on);
 
 /**
  * Audio API
  */
-bool sim_robot_audio_play(const char *track);
-bool sim_robot_audio_pause(void);
-bool sim_robot_audio_resume(void);
-bool sim_robot_audio_stop(void);
-bool sim_robot_audio_set_volume(uint8_t volume);
-bool sim_robot_audio_play_notification(notif_event_t event);
+bool hw_robot_audio_play(const char *track);
+bool hw_robot_audio_pause(void);
+bool hw_robot_audio_resume(void);
+bool hw_robot_audio_stop(void);
+bool hw_robot_audio_set_volume(uint8_t volume);
+bool hw_robot_audio_play_notification(notif_event_t event);
 
 /**
  * Notification channel housekeeping: detects (non-blocking) when the current
  * notification sound has finished and restores the music volume (ducking).
- * Called from sim_robot_tick().
+ * Called from hw_robot_tick().
  */
-void sim_robot_audio_service(void);
+void hw_robot_audio_service(void);
 
 /**
  * Stops the notification process and the music player (on server shutdown).
  */
-void sim_robot_audio_shutdown(void);
+void hw_robot_audio_shutdown(void);
 
 /**
  * Map API
  */
-void sim_robot_map_reset(void);
+void hw_robot_map_reset(void);
 
-#endif /* SIM_ROBOT_H */
+#endif /* HW_ROBOT_H */

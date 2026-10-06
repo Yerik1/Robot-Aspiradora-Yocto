@@ -9,7 +9,7 @@
 #include "../mongoose/mongoose.h"
 #include "crypto_util.h"
 #include "auth.h"
-#include "sim_robot.h"
+#include "hw_robot.h"
 #include "rpc_handlers.h"
 
 static const char *s_listen_on = "http://0.0.0.0:8080";
@@ -23,7 +23,7 @@ static void sig_handler(int sig) {
 }
 
 static void broadcast_telemetry(struct mg_mgr *mgr) {
-    robot_state_t *st = sim_robot_get_state();
+    robot_state_t *st = hw_robot_get_state();
 
     const char *audio_state_str = "stopped";
     if (st->audio_state == SIM_AUDIO_PLAYING) audio_state_str = "playing";
@@ -108,7 +108,7 @@ static void broadcast_telemetry(struct mg_mgr *mgr) {
 
 static void timer_tick(void *arg) {
     struct mg_mgr *mgr = (struct mg_mgr *)arg;
-    sim_robot_tick(0.2); /* 200 ms tick */
+    hw_robot_tick(0.2); /* 200 ms tick */
     broadcast_telemetry(mgr);
 }
 
@@ -231,11 +231,11 @@ int main(int argc, char *argv[]) {
 
     /* Initialize subsystems */
     auth_init("users.db");
-    sim_robot_init();
+    hw_robot_init();
     rpc_handlers_init(&s_rpc_head);
 
     /* Audible feedback: system startup */
-    sim_robot_audio_play_notification(NOTIF_SYSTEM_START);
+    hw_robot_audio_play_notification(NOTIF_SYSTEM_START);
 
     /* Add 5 Hz simulation and telemetry timer (every 200 ms) */
     mg_timer_add(&mgr, 200, MG_TIMER_REPEAT, timer_tick, &mgr);
@@ -262,7 +262,7 @@ int main(int argc, char *argv[]) {
     printf("\n\033[33m[SHUTDOWN]\033[0m Shutting down server gracefully...\n");
     mg_mgr_free(&mgr);
     mg_rpc_del(&s_rpc_head, NULL);
-    sim_robot_audio_shutdown();
+    hw_robot_audio_shutdown();
     auth_cleanup();
 
     printf("\033[32m[SHUTDOWN]\033[0m Clean exit.\n");

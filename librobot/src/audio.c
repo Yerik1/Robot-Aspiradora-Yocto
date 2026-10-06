@@ -55,8 +55,8 @@
  * uno fijo para los 4 sonidos de notificación obligatorios, y otro para
  * la lista de reproducción de música de fondo que expone
  * audio_list_files(). Ajustar aquí si la convención final es otra. */
-#define AUDIO_NOTIFICATION_DIR "/usr/share/robot-aspirador/audio"
-#define AUDIO_MUSIC_DIR        "/usr/share/robot-aspirador/music"
+#define AUDIO_NOTIFICATION_DIR "/usr/share/robot-server/server/SoundEffects"
+#define AUDIO_MUSIC_DIR        "/usr/share/robot-server/server/music"
 
 /* Nombres reales de los archivos en server/SoundEffects/ (se instalan en
  * AUDIO_NOTIFICATION_DIR desde la receta de Yocto). */

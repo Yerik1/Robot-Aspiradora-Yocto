@@ -15,7 +15,7 @@ set(SERVER_SOURCES
     src/rpc_handlers.c
     src/auth.c
     src/crypto_util.c
-    src/sim_robot.c
+    src/hw_robot.c
     mongoose/mongoose.c
 )
 
@@ -25,6 +25,7 @@ target_include_directories(robot-server PRIVATE
     src
     mongoose
     ${OPENSSL_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../librobot/include
 )
 
 target_link_libraries(robot-server PRIVATE
@@ -32,7 +33,10 @@ target_link_libraries(robot-server PRIVATE
     OpenSSL::Crypto
     Threads::Threads
     m
+    robot
 )
 
 install(TARGETS robot-server DESTINATION bin)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../client DESTINATION share/robot-server)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/music DESTINATION share/robot-server/server)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/SoundEffects DESTINATION share/robot-server/server)

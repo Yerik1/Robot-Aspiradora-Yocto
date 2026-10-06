@@ -1,7 +1,7 @@
 #include "rpc_handlers.h"
 #include "auth.h"
 #include "crypto_util.h"
-#include "sim_robot.h"
+#include "hw_robot.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,9 +116,9 @@ static void rpc_robot_set_mode(struct mg_rpc_req *r) {
     }
 
     if (strcmp(mode, "autonomous") == 0) {
-        sim_robot_set_mode(MODE_AUTONOMOUS);
+        hw_robot_set_mode(MODE_AUTONOMOUS);
     } else if (strcmp(mode, "manual") == 0) {
-        sim_robot_set_mode(MODE_MANUAL);
+        hw_robot_set_mode(MODE_MANUAL);
     } else {
         free(mode);
         mg_rpc_err(r, 400, "Unknown mode: must be 'autonomous' or 'manual'");
@@ -147,7 +147,7 @@ static void rpc_robot_move(struct mg_rpc_req *r) {
         return;
     }
 
-    bool ok = sim_robot_move(dir, (uint8_t)speed, (uint8_t)radius);
+    bool ok = hw_robot_move(dir, (uint8_t)speed, (uint8_t)radius);
     free(dir);
 
     if (ok) {
@@ -158,7 +158,7 @@ static void rpc_robot_move(struct mg_rpc_req *r) {
 }
 
 static void rpc_robot_stop(struct mg_rpc_req *r) {
-    sim_robot_stop();
+    hw_robot_stop();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
@@ -169,29 +169,29 @@ static void rpc_robot_vacuum(struct mg_rpc_req *r) {
         return;
     }
 
-    sim_robot_set_vacuum(enabled);
+    hw_robot_set_vacuum(enabled);
     mg_rpc_ok(r, "{%m:%s}", MG_ESC("vacuum"), enabled ? "true" : "false");
 }
 
 static void rpc_audio_play(struct mg_rpc_req *r) {
     char *file = mg_json_get_str(r->frame, "$.params.file");
-    sim_robot_audio_play(file ? file : "");
+    hw_robot_audio_play(file ? file : "");
     if (file) free(file);
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_audio_pause(struct mg_rpc_req *r) {
-    sim_robot_audio_pause();
+    hw_robot_audio_pause();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_audio_resume(struct mg_rpc_req *r) {
-    sim_robot_audio_resume();
+    hw_robot_audio_resume();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_audio_stop(struct mg_rpc_req *r) {
-    sim_robot_audio_stop();
+    hw_robot_audio_stop();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
@@ -200,7 +200,7 @@ static void rpc_audio_volume(struct mg_rpc_req *r) {
     mg_json_get_num(r->frame, "$.params.volume", &vol);
     if (vol < 0) vol = 0;
     if (vol > 100) vol = 100;
-    sim_robot_audio_set_volume((uint8_t)vol);
+    hw_robot_audio_set_volume((uint8_t)vol);
     mg_rpc_ok(r, "{%m:%d}", MG_ESC("volume"), (int)vol);
 }
 
@@ -211,7 +211,7 @@ static void rpc_audio_notification(struct mg_rpc_req *r) {
         mg_rpc_err(r, 400, "%m", MG_ESC("Invalid notification event (0-3)"));
         return;
     }
-    bool played = sim_robot_audio_play_notification((notif_event_t)(int)evt);
+    bool played = hw_robot_audio_play_notification((notif_event_t)(int)evt);
     /* success=true aunque se omita por cooldown: no es un error */
     mg_rpc_ok(r, "{%m:true,%m:%s}", MG_ESC("success"),
               MG_ESC("played"), played ? "true" : "false");
@@ -260,7 +260,7 @@ static void rpc_audio_list_files(struct mg_rpc_req *r) {
 }
 
 static void rpc_map_get(struct mg_rpc_req *r) {
-    robot_state_t *st = sim_robot_get_state();
+    robot_state_t *st = hw_robot_get_state();
 
     /* Format 2D grid as a compact flat array */
     struct mg_iobuf io = {0, 0, 0, 256};
@@ -290,12 +290,12 @@ static void rpc_map_get(struct mg_rpc_req *r) {
 }
 
 static void rpc_map_reset(struct mg_rpc_req *r) {
-    sim_robot_map_reset();
+    hw_robot_map_reset();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_system_status(struct mg_rpc_req *r) {
-    robot_state_t *st = sim_robot_get_state();
+    robot_state_t *st = hw_robot_get_state();
     mg_rpc_ok(r, "{%m:%m,%m:%m,%m:%d}",
               MG_ESC("firmware"), MG_ESC("Robot-Aspiradora-Yocto v0.1.0"),
               MG_ESC("mode"), MG_ESC(st->mode == MODE_AUTONOMOUS ? "autonomous" : "manual"),

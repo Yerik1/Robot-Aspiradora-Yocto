@@ -1,12 +1,12 @@
 CC ?= gcc
-CFLAGS ?= -Wall -Wextra -std=gnu11 -O2 -D_GNU_SOURCE -Isrc -Imongoose
-LDFLAGS ?= -lssl -lcrypto -lm -lpthread
+CFLAGS ?= -Wall -Wextra -std=gnu11 -O2 -D_GNU_SOURCE -Isrc -Imongoose -I../librobot/include
+LDFLAGS ?= -lssl -lcrypto -lm -lpthread -lrobot
 
 SRCS = src/main.c \
        src/rpc_handlers.c \
        src/auth.c \
        src/crypto_util.c \
-       src/sim_robot.c \
+       src/hw_robot.c \
        mongoose/mongoose.c
 
 OBJS = $(SRCS:.c=.o)
