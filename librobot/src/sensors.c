@@ -1,151 +1,172 @@
 /**
  * sensors.c
  *
- * Implementación de US-302 (sensores): lectura de distancia con los tres
- * HC-SR04 (frontal, izquierdo, derecho).
+ * Sensores de proximidad del robot:
+ *   - SENSOR_FRONT: ultrasónico HC-SR04, mide distancia en cm.
+ *   - SENSOR_LEFT / SENSOR_RIGHT: ópticos reflectivos TCRT5000L, solo
+ *     indican presencia de obstáculo (salida digital por fototransistor).
  *
- * Nota de diseño importante (trade-off de seguridad): sensor_obstacle_detected()
- * devuelve `false` (sin obstáculo) tanto cuando el sensor mide una distancia
- * mayor al umbral COMO cuando la lectura falla por timeout. Esto es correcto
- * la mayoría de las veces -- un HC-SR04 que no recibe eco normalmente
- * significa "nada dentro de ~4m", que es el caso normal en espacio abierto --
- * pero también podría enmascarar una falla real del sensor (cable suelto,
- * sensor dañado, ángulo de reflexión desfavorable) como si fuera "camino
- * libre". Para la lógica de navegación autónoma se recomienda NO confiar
- * ciegamente en esta función sola: si conviene, vigilar en la capa de
- * aplicación cuántos timeouts consecutivos da sensor_read_distance_cm() y
- * tratar una racha larga de timeouts como una condición de falla distinta
- * de "sin obstáculo" (por ejemplo, deteniendo el robot en vez de asumir vía
- * libre).
+ * Las funciones de este módulo bloquean mientras esperan el eco del
+ * HC-SR04 (hasta SENSOR_TIMEOUT_US). El servidor debe llamarlas desde un
+ * hilo dedicado a sensores, no desde el bucle de eventos.
  */
 #include <pigpio.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "../include/librobot.h"
 #include "internal.h"
 #include "robot_pins.h"
 
-typedef struct {
-    int trig_pin;
-    int echo_pin;
-} sensor_ctx_t;
-
-static sensor_ctx_t g_sensors[3] = {
-    [SENSOR_FRONT] = { PIN_SENSOR_FRONT_TRIG, PIN_SENSOR_FRONT_ECHO },
-    [SENSOR_LEFT]  = { PIN_SENSOR_LEFT_TRIG,  PIN_SENSOR_LEFT_ECHO  },
-    [SENSOR_RIGHT] = { PIN_SENSOR_RIGHT_TRIG, PIN_SENSOR_RIGHT_ECHO },
-};
-
 static pthread_mutex_t g_sensor_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Disparar dos sensores HC-SR04 casi al mismo tiempo produce cross-talk
- * entre sus ecos. g_last_trigger_tick/valid recuerdan cuándo fue el último
- * disparo (de cualquier sensor) para forzar automáticamente una separación
- * mínima de SENSOR_MIN_GAP_US antes del siguiente, sin que quien llama a
- * esta biblioteca tenga que acordarse de hacerlo. */
 static uint32_t g_last_trigger_tick = 0;
-static bool g_last_trigger_valid = false;
+static bool g_triggered_once = false;
 
-static void enforce_min_gap(void)
+static bool is_ir_sensor(sensor_id_t sensor)
 {
-    if (!g_last_trigger_valid) return;
-
-    uint32_t now = gpioTick();
-    uint32_t elapsed = now - g_last_trigger_tick; /* resta sin signo: correcto
-                                                      incluso si gpioTick()
-                                                      dio la vuelta (wrap) */
-    if (elapsed < SENSOR_MIN_GAP_US) {
-        gpioDelay(SENSOR_MIN_GAP_US - elapsed);
-    }
+    return sensor == SENSOR_LEFT || sensor == SENSOR_RIGHT;
 }
 
-robot_status_t sensor_read_distance_cm(sensor_id_t sensor, float *distance_cm)
+static unsigned ir_pin(sensor_id_t sensor)
 {
-    if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
-    if (sensor != SENSOR_FRONT && sensor != SENSOR_LEFT && sensor != SENSOR_RIGHT) {
-        return ROBOT_ERR_INVALID_PARAM;
-    }
-    if (distance_cm == NULL) return ROBOT_ERR_INVALID_PARAM;
-
-    sensor_ctx_t *s = &g_sensors[sensor];
-
-    pthread_mutex_lock(&g_sensor_lock);
-
-    enforce_min_gap();
-
-    /* Pulso de disparo de 10us, tal como pide el datasheet del HC-SR04. */
-    gpioTrigger(s->trig_pin, 10, 1);
-    g_last_trigger_tick = gpioTick();
-    g_last_trigger_valid = true;
-
-    /* Esperar a que ECHO suba (inicio del pulso de eco). */
-    uint32_t wait_start = gpioTick();
-    while (gpioRead(s->echo_pin) == 0) {
-        if ((gpioTick() - wait_start) > SENSOR_TIMEOUT_US) {
-            pthread_mutex_unlock(&g_sensor_lock);
-            return ROBOT_ERR_SENSOR_TIMEOUT;
-        }
-    }
-    uint32_t echo_start = gpioTick();
-
-    /* Esperar a que ECHO baje (fin del pulso de eco). */
-    while (gpioRead(s->echo_pin) == 1) {
-        if ((gpioTick() - echo_start) > SENSOR_TIMEOUT_US) {
-            pthread_mutex_unlock(&g_sensor_lock);
-            return ROBOT_ERR_SENSOR_TIMEOUT;
-        }
-    }
-    uint32_t echo_end = gpioTick();
-
-    pthread_mutex_unlock(&g_sensor_lock);
-
-    uint32_t pulse_us = echo_end - echo_start;
-    *distance_cm = (float)pulse_us / SENSOR_SPEED_SOUND_DIV;
-
-    return ROBOT_OK;
+    return (sensor == SENSOR_LEFT) ? PIN_SENSOR_LEFT_IR : PIN_SENSOR_RIGHT_IR;
 }
-
-bool sensor_obstacle_detected(sensor_id_t sensor, float threshold_cm)
-{
-    float distance_cm;
-    robot_status_t status = sensor_read_distance_cm(sensor, &distance_cm);
-
-    /* Ver nota de diseño al inicio del archivo: timeout se trata igual que
-     * "sin obstáculo". */
-    if (status != ROBOT_OK) {
-        return false;
-    }
-
-    return distance_cm <= threshold_cm;
-}
-
-/* ==========================================================================
- * Init / cleanup internos (llamados por librobot.c)
- * ========================================================================== */
 
 robot_status_t sensor_module_init(void)
 {
-    sensor_id_t ids[] = { SENSOR_FRONT, SENSOR_LEFT, SENSOR_RIGHT };
-    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
-        sensor_ctx_t *s = &g_sensors[ids[i]];
-        if (gpioSetMode(s->trig_pin, PI_OUTPUT) != 0) return ROBOT_ERR_GPIO;
-        if (gpioSetMode(s->echo_pin, PI_INPUT) != 0) return ROBOT_ERR_GPIO;
-        gpioWrite(s->trig_pin, 0);
-    }
+    if (gpioSetMode(PIN_SENSOR_FRONT_TRIG, PI_OUTPUT) != 0) return ROBOT_ERR_GPIO;
+    if (gpioWrite(PIN_SENSOR_FRONT_TRIG, 0) != 0)           return ROBOT_ERR_GPIO;
+    if (gpioSetMode(PIN_SENSOR_FRONT_ECHO, PI_INPUT) != 0)  return ROBOT_ERR_GPIO;
+    if (gpioSetPullUpDown(PIN_SENSOR_FRONT_ECHO, PI_PUD_DOWN) != 0) return ROBOT_ERR_GPIO;
 
-    g_last_trigger_valid = false;
+    /* TCRT5000L: pull-up externo de 10 kOhm, se desactiva el interno. */
+    if (gpioSetMode(PIN_SENSOR_LEFT_IR, PI_INPUT) != 0)  return ROBOT_ERR_GPIO;
+    if (gpioSetPullUpDown(PIN_SENSOR_LEFT_IR, PI_PUD_OFF) != 0)  return ROBOT_ERR_GPIO;
+    if (gpioSetMode(PIN_SENSOR_RIGHT_IR, PI_INPUT) != 0) return ROBOT_ERR_GPIO;
+    if (gpioSetPullUpDown(PIN_SENSOR_RIGHT_IR, PI_PUD_OFF) != 0) return ROBOT_ERR_GPIO;
 
+    g_triggered_once = false;
     return ROBOT_OK;
 }
 
 void sensor_module_cleanup(void)
 {
-    /* No hay estado de hardware persistente que revertir más allá de dejar
-     * TRIG en bajo; los pines vuelven a su default al terminar el proceso
-     * (gpioTerminate() en librobot.c). Se deja explícito por claridad y
-     * por si en el futuro se agrega estado (p. ej. un hilo de polling). */
-    sensor_id_t ids[] = { SENSOR_FRONT, SENSOR_LEFT, SENSOR_RIGHT };
-    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
-        gpioWrite(g_sensors[ids[i]].trig_pin, 0);
+    gpioWrite(PIN_SENSOR_FRONT_TRIG, 0);
+}
+
+/* Lectura del HC-SR04 frontal. Debe llamarse con g_sensor_lock tomado. */
+static robot_status_t read_front_cm(float *distance_cm)
+{
+    /* Respetar la separación mínima entre disparos para que se disipe el
+     * eco del disparo anterior. */
+    if (g_triggered_once) {
+        uint32_t elapsed = gpioTick() - g_last_trigger_tick;
+        if (elapsed < SENSOR_MIN_GAP_US) {
+            gpioDelay(SENSOR_MIN_GAP_US - elapsed);
+        }
     }
-    g_last_trigger_valid = false;
+
+    if (gpioTrigger(PIN_SENSOR_FRONT_TRIG, 10, 1) != 0) {
+        return ROBOT_ERR_GPIO;
+    }
+    g_last_trigger_tick = gpioTick();
+    g_triggered_once = true;
+
+    /* Esperar flanco de subida de ECHO. */
+    uint32_t start = gpioTick();
+    while (gpioRead(PIN_SENSOR_FRONT_ECHO) == 0) {
+        if (gpioTick() - start > SENSOR_TIMEOUT_US) {
+            return ROBOT_ERR_SENSOR_TIMEOUT;
+        }
+    }
+
+    /* Medir el ancho del pulso de ECHO. */
+    uint32_t rise = gpioTick();
+    while (gpioRead(PIN_SENSOR_FRONT_ECHO) == 1) {
+        if (gpioTick() - rise > SENSOR_TIMEOUT_US) {
+            return ROBOT_ERR_SENSOR_TIMEOUT;
+        }
+    }
+    uint32_t width_us = gpioTick() - rise;
+
+    *distance_cm = (float)width_us / SENSOR_SPEED_SOUND_DIV;
+    return ROBOT_OK;
+}
+
+/* Lectura de un TCRT5000L con votación por mayoría para evitar oscilaciones
+ * cuando el objeto está al límite del alcance. */
+static robot_status_t read_ir(sensor_id_t sensor, bool *detected)
+{
+    unsigned pin = ir_pin(sensor);
+    int hits = 0;
+
+    for (int i = 0; i < IR_SAMPLES; i++) {
+        int level = gpioRead(pin);
+        if (level < 0) {
+            return ROBOT_ERR_GPIO;
+        }
+        if (level == IR_ACTIVE_LEVEL) {
+            hits++;
+        }
+        if (i < IR_SAMPLES - 1) {
+            gpioDelay(IR_SAMPLE_GAP_US);
+        }
+    }
+
+    *detected = (hits * 2 > IR_SAMPLES);
+    return ROBOT_OK;
+}
+
+robot_status_t sensor_read_distance_cm(sensor_id_t sensor, float *distance_cm)
+{
+    if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
+    if (distance_cm == NULL)  return ROBOT_ERR_INVALID_PARAM;
+
+    /* Los TCRT5000L no miden distancia. */
+    if (sensor != SENSOR_FRONT) return ROBOT_ERR_INVALID_PARAM;
+
+    pthread_mutex_lock(&g_sensor_lock);
+    robot_status_t st = read_front_cm(distance_cm);
+    pthread_mutex_unlock(&g_sensor_lock);
+    return st;
+}
+
+robot_status_t sensor_read_obstacle(sensor_id_t sensor,
+                                    float threshold_cm,
+                                    bool *detected)
+{
+    if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
+    if (detected == NULL)     return ROBOT_ERR_INVALID_PARAM;
+
+    robot_status_t st;
+    pthread_mutex_lock(&g_sensor_lock);
+
+    if (is_ir_sensor(sensor)) {
+        st = read_ir(sensor, detected);
+    } else if (sensor == SENSOR_FRONT) {
+        float cm = 0.0f;
+        st = read_front_cm(&cm);
+        if (st == ROBOT_ERR_SENSOR_TIMEOUT) {
+            /* Sin eco: nada dentro del alcance del HC-SR04. */
+            *detected = false;
+            st = ROBOT_OK;
+        } else if (st == ROBOT_OK) {
+            *detected = (cm <= threshold_cm);
+        }
+    } else {
+        st = ROBOT_ERR_INVALID_PARAM;
+    }
+
+    pthread_mutex_unlock(&g_sensor_lock);
+    return st;
+}
+
+bool sensor_obstacle_detected(sensor_id_t sensor, float threshold_cm)
+{
+    bool detected = false;
+    if (sensor_read_obstacle(sensor, threshold_cm, &detected) != ROBOT_OK) {
+        return false;
+    }
+    return detected;
 }

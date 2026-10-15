@@ -6,6 +6,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Conexion WebSocket que envio la peticion (main.c la pasa en req_data) */
+static struct mg_connection *req_conn(struct mg_rpc_req *r) {
+    return (struct mg_connection *)r->req_data;
+}
+
+/* Los comandos del robot, audio y mapa requieren haber hecho auth.login
+ * en la misma conexion. Responde 401 y devuelve false si no hay sesion. */
+static bool require_auth(struct mg_rpc_req *r) {
+    struct mg_connection *c = req_conn(r);
+    if (c != NULL && c->data[1] == CONN_AUTH_FLAG) {
+        return true;
+    }
+    mg_rpc_err(r, 401, "%m", MG_ESC("Not authenticated: login required"));
+    return false;
+}
+
 static void rpc_auth_login(struct mg_rpc_req *r) {
     char *enc_b64 = mg_json_get_str(r->frame, "$.params.encrypted");
     char *iv_b64 = mg_json_get_str(r->frame, "$.params.iv");
@@ -13,7 +29,7 @@ static void rpc_auth_login(struct mg_rpc_req *r) {
     if (!enc_b64 || !iv_b64) {
         free(enc_b64);
         free(iv_b64);
-        mg_rpc_err(r, 400, "Missing encrypted credentials or IV");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Missing encrypted credentials or IV"));
         return;
     }
 
@@ -23,7 +39,7 @@ static void rpc_auth_login(struct mg_rpc_req *r) {
 
     if (!plaintext) {
         printf("\033[31m[AUTH]\033[0m Failed to decrypt login payload (invalid key or bad ciphertext)\n");
-        mg_rpc_err(r, 401, "Decryption failed on server");
+        mg_rpc_err(r, 401, "%m", MG_ESC("Decryption failed on server"));
         return;
     }
 
@@ -35,18 +51,20 @@ static void rpc_auth_login(struct mg_rpc_req *r) {
     if (!user || !pass) {
         free(user);
         free(pass);
-        mg_rpc_err(r, 400, "Invalid JSON inside encrypted payload");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Invalid JSON inside encrypted payload"));
         return;
     }
 
     char token[TOKEN_LEN + 1];
     char err[128];
     if (auth_login_user(user, pass, token, sizeof(token), err, sizeof(err))) {
+        struct mg_connection *c = req_conn(r);
+        if (c != NULL) c->data[1] = CONN_AUTH_FLAG;
         mg_rpc_ok(r, "{%m:%m,%m:%m}",
                   MG_ESC("token"), MG_ESC(token),
                   MG_ESC("username"), MG_ESC(user));
     } else {
-        mg_rpc_err(r, 401, "%s", err);
+        mg_rpc_err(r, 401, "%m", MG_ESC(err));
     }
 
     free(user);
@@ -60,7 +78,7 @@ static void rpc_auth_register(struct mg_rpc_req *r) {
     if (!enc_b64 || !iv_b64) {
         free(enc_b64);
         free(iv_b64);
-        mg_rpc_err(r, 400, "Missing encrypted credentials or IV");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Missing encrypted credentials or IV"));
         return;
     }
 
@@ -70,7 +88,7 @@ static void rpc_auth_register(struct mg_rpc_req *r) {
 
     if (!plaintext) {
         printf("\033[31m[AUTH]\033[0m Failed to decrypt registration payload\n");
-        mg_rpc_err(r, 401, "Decryption failed on server");
+        mg_rpc_err(r, 401, "%m", MG_ESC("Decryption failed on server"));
         return;
     }
 
@@ -82,7 +100,7 @@ static void rpc_auth_register(struct mg_rpc_req *r) {
     if (!user || !pass) {
         free(user);
         free(pass);
-        mg_rpc_err(r, 400, "Invalid JSON inside encrypted payload");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Invalid JSON inside encrypted payload"));
         return;
     }
 
@@ -92,7 +110,7 @@ static void rpc_auth_register(struct mg_rpc_req *r) {
                   MG_ESC("success"),
                   MG_ESC("message"), MG_ESC("User registered successfully"));
     } else {
-        mg_rpc_err(r, 400, "%s", err);
+        mg_rpc_err(r, 400, "%m", MG_ESC(err));
     }
 
     free(user);
@@ -100,6 +118,8 @@ static void rpc_auth_register(struct mg_rpc_req *r) {
 }
 
 static void rpc_auth_logout(struct mg_rpc_req *r) {
+    struct mg_connection *c = req_conn(r);
+    if (c != NULL) c->data[1] = 0;
     char *token = mg_json_get_str(r->frame, "$.params.token");
     if (token) {
         auth_logout(token);
@@ -109,9 +129,10 @@ static void rpc_auth_logout(struct mg_rpc_req *r) {
 }
 
 static void rpc_robot_set_mode(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     char *mode = mg_json_get_str(r->frame, "$.params.mode");
     if (!mode) {
-        mg_rpc_err(r, 400, "Missing mode parameter ('autonomous' or 'manual')");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Missing mode parameter ('autonomous' or 'manual')"));
         return;
     }
 
@@ -121,7 +142,7 @@ static void rpc_robot_set_mode(struct mg_rpc_req *r) {
         hw_robot_set_mode(MODE_MANUAL);
     } else {
         free(mode);
-        mg_rpc_err(r, 400, "Unknown mode: must be 'autonomous' or 'manual'");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Unknown mode: must be 'autonomous' or 'manual'"));
         return;
     }
 
@@ -130,6 +151,7 @@ static void rpc_robot_set_mode(struct mg_rpc_req *r) {
 }
 
 static void rpc_robot_move(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     char *dir = mg_json_get_str(r->frame, "$.params.direction");
     double speed = 50.0;
     double radius = 50.0;
@@ -143,7 +165,7 @@ static void rpc_robot_move(struct mg_rpc_req *r) {
     if (radius > 100) radius = 100;
 
     if (!dir) {
-        mg_rpc_err(r, 400, "Missing direction parameter");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Missing direction parameter"));
         return;
     }
 
@@ -153,58 +175,76 @@ static void rpc_robot_move(struct mg_rpc_req *r) {
     if (ok) {
         mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
     } else {
-        mg_rpc_err(r, 403, "Cannot execute manual move while in autonomous mode");
+        mg_rpc_err(r, 403, "%m", MG_ESC("Cannot execute manual move while in autonomous mode"));
     }
 }
 
 static void rpc_robot_stop(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     hw_robot_stop();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_robot_vacuum(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     bool enabled = false;
     if (!mg_json_get_bool(r->frame, "$.params.enabled", &enabled)) {
-        mg_rpc_err(r, 400, "Missing boolean enabled parameter");
+        mg_rpc_err(r, 400, "%m", MG_ESC("Missing boolean enabled parameter"));
         return;
     }
 
-    hw_robot_set_vacuum(enabled);
+    if (!hw_robot_set_vacuum_manual(enabled)) {
+        mg_rpc_err(r, 500, "%m", MG_ESC("Vacuum motor command failed"));
+        return;
+    }
     mg_rpc_ok(r, "{%m:%s}", MG_ESC("vacuum"), enabled ? "true" : "false");
 }
 
 static void rpc_audio_play(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     char *file = mg_json_get_str(r->frame, "$.params.file");
-    hw_robot_audio_play(file ? file : "");
-    if (file) free(file);
-    mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
+    bool ok = hw_robot_audio_play(file);
+    free(file);
+    if (ok) {
+        mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
+    } else {
+        mg_rpc_err(r, 404, "%m", MG_ESC("Track not found or invalid name"));
+    }
 }
 
 static void rpc_audio_pause(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     hw_robot_audio_pause();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_audio_resume(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     hw_robot_audio_resume();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_audio_stop(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     hw_robot_audio_stop();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_audio_volume(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     double vol = 70.0;
     mg_json_get_num(r->frame, "$.params.volume", &vol);
     if (vol < 0) vol = 0;
     if (vol > 100) vol = 100;
-    hw_robot_audio_set_volume((uint8_t)vol);
+    if (!hw_robot_audio_set_volume((uint8_t)vol)) {
+        mg_rpc_err(r, 500, "%m", MG_ESC("Volume command failed"));
+        return;
+    }
     mg_rpc_ok(r, "{%m:%d}", MG_ESC("volume"), (int)vol);
 }
 
 static void rpc_audio_notification(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     double evt = -1.0;
     mg_json_get_num(r->frame, "$.params.event", &evt);
     if (evt < NOTIF_SYSTEM_START || evt > NOTIF_MANUAL_MODE) {
@@ -212,54 +252,42 @@ static void rpc_audio_notification(struct mg_rpc_req *r) {
         return;
     }
     bool played = hw_robot_audio_play_notification((notif_event_t)(int)evt);
-    /* success=true aunque se omita por cooldown: no es un error */
+    /* success=true aunque no se haya reproducido (p. ej. falta el archivo) */
     mg_rpc_ok(r, "{%m:true,%m:%s}", MG_ESC("success"),
               MG_ESC("played"), played ? "true" : "false");
 }
 
-#include <dirent.h>
-
+/* Lista de canciones: usa audio_list_files() de librobot, la misma carpeta
+ * desde la que hw_robot_audio_play() reproduce. Devuelve solo nombres. */
 static void rpc_audio_list_files(struct mg_rpc_req *r) {
-    struct dirent *de;
-    DIR *dr = opendir("music");
-    
+    if (!require_auth(r)) return;
+    static char names[TRACK_LIST_MAX][TRACK_NAME_MAX];
+    size_t found = hw_robot_audio_list(names, TRACK_LIST_MAX);
+
     struct mg_iobuf io = {0, 0, 0, 256};
     mg_iobuf_init(&io, 1024, 256);
     mg_iobuf_add(&io, io.len, "[", 1);
-    
+
     bool first = true;
-    if (dr != NULL) {
-        while ((de = readdir(dr)) != NULL) {
-            // Check if file ends with .mp3
-            size_t len = strlen(de->d_name);
-            if (len > 4 && strcasecmp(de->d_name + len - 4, ".mp3") == 0) {
-                if (!first) {
-                    mg_iobuf_add(&io, io.len, ",", 1);
-                }
-                mg_iobuf_add(&io, io.len, "\"", 1);
-                mg_iobuf_add(&io, io.len, de->d_name, strlen(de->d_name));
-                mg_iobuf_add(&io, io.len, "\"", 1);
-                first = false;
-            }
+    for (size_t i = 0; i < found; i++) {
+        /* Se omiten nombres que romperian el JSON */
+        if (strpbrk(names[i], "\"\\") != NULL) continue;
+        if (!first) {
+            mg_iobuf_add(&io, io.len, ",", 1);
         }
-        closedir(dr);
+        mg_iobuf_add(&io, io.len, "\"", 1);
+        mg_iobuf_add(&io, io.len, names[i], strlen(names[i]));
+        mg_iobuf_add(&io, io.len, "\"", 1);
+        first = false;
     }
-    
     mg_iobuf_add(&io, io.len, "]", 1);
-    
-    /* Create an outer JSON array wrapper manually since mg_rpc_ok wraps in {"result": ...} */
-    /* Wait, mg_rpc_ok wraps the result automatically, so if we pass raw JSON, we must use %.*s or %M? 
-       Actually mg_rpc_ok uses mg_json_out. But let's just use mg_rpc_ok with a wrapper object or directly use mg_io_send if needed.
-       Wait, looking at rpc_map_get, they used %.*s to print the json array inside the object. So we can do: */
-    
-    // Ensure null-termination just in case
-    mg_iobuf_add(&io, io.len, "\0", 1);
-    
-    mg_rpc_ok(r, "%.*s", (int)(io.len - 1), io.buf);
+
+    mg_rpc_ok(r, "%.*s", (int)io.len, (char *)io.buf);
     mg_iobuf_free(&io);
 }
 
 static void rpc_map_get(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     robot_state_t *st = hw_robot_get_state();
 
     /* Format 2D grid as a compact flat array */
@@ -290,11 +318,13 @@ static void rpc_map_get(struct mg_rpc_req *r) {
 }
 
 static void rpc_map_reset(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     hw_robot_map_reset();
     mg_rpc_ok(r, "{%m:true}", MG_ESC("success"));
 }
 
 static void rpc_system_status(struct mg_rpc_req *r) {
+    if (!require_auth(r)) return;
     robot_state_t *st = hw_robot_get_state();
     mg_rpc_ok(r, "{%m:%m,%m:%m,%m:%d}",
               MG_ESC("firmware"), MG_ESC("Robot-Aspiradora-Yocto v0.1.0"),

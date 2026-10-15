@@ -2,6 +2,10 @@
  * app.js - Main Client Dashboard Controller
  * Connects to JSON-RPC over WebSocket, manages encrypted auth,
  * controls the robot, and renders real-time telemetry and 2D route map.
+ *
+ * La sesion vive en la conexion WebSocket: el servidor solo acepta
+ * comandos del robot despues de auth.login en esa misma conexion. Si la
+ * conexion se cae, hay que iniciar sesion de nuevo.
  */
 
 // Initialize JSON-RPC WebSocket
@@ -24,6 +28,9 @@ const state = {
     robot: { x: 12, y: 12, heading: 0 },
     logs: []
 };
+
+// Sensor frontal (HC-SR04): valor que envia el servidor cuando no hay eco
+const FRONT_NO_ECHO_CM = 400;
 
 // DOM Elements
 const E = (id) => document.getElementById(id);
@@ -122,13 +129,46 @@ function appendLog(category, text, type = 'info') {
     const entry = document.createElement('div');
     entry.className = `log-entry log-${type}`;
     entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-cat">[${category}]</span> ${text}`;
-    
+
     logBox.appendChild(entry);
     logBox.scrollTop = logBox.scrollHeight;
 
     // Keep log max 150 items
     while (logBox.children.length > 150) {
         logBox.removeChild(logBox.firstChild);
+    }
+}
+
+// Datos que requieren sesion iniciada (mapa y lista de canciones)
+function loadSessionData() {
+    rpc.call('map.get').then(handleFullMap).catch(console.error);
+    rpc.call('audio.list_files').then(files => {
+        const sel = E('audio-playlist');
+        sel.innerHTML = '';
+        files.forEach(f => {
+            const opt = document.createElement('option');
+            opt.value = f;
+            opt.textContent = f;
+            sel.appendChild(opt);
+        });
+
+        if (files.length > 0) {
+            E('audio-track-display').textContent = `${files[0]} (STOPPED)`;
+        } else {
+            E('audio-track-display').textContent = 'No hay canciones';
+        }
+    }).catch(console.error);
+}
+
+// Vuelve a la pantalla de inicio de sesion
+function showLogin(message) {
+    state.authenticated = false;
+    state.token = null;
+    state.username = null;
+    E('auth-modal').style.display = 'flex';
+    E('dashboard-view').style.display = 'none';
+    if (message) {
+        E('auth-error').textContent = message;
     }
 }
 
@@ -143,25 +183,11 @@ function setupUI() {
             badge.className = 'status-badge online';
             badge.textContent = 'ONLINE (WS)';
             appendLog('WS', 'Connected to robot server', 'success');
-            // Fetch initial map
-            rpc.call('map.get').then(handleFullMap).catch(console.error);
-            // Load available songs into playlist
-            rpc.call('audio.list_files').then(files => {
-                const sel = E('audio-playlist');
-                sel.innerHTML = '';
-                files.forEach(f => {
-                    const opt = document.createElement('option');
-                    opt.value = f;
-                    opt.textContent = f;
-                    sel.appendChild(opt);
-                });
-                
-                if (files.length > 0) {
-                    E('audio-track-display').textContent = `${files[0]} (STOPPED)`;
-                } else {
-                    E('audio-track-display').textContent = 'No hay canciones';
-                }
-            }).catch(console.error);
+            // La sesion pertenece a la conexion anterior: pedir login de nuevo
+            if (state.authenticated) {
+                showLogin('Se perdio la conexion. Inicie sesion de nuevo.');
+                appendLog('AUTH', 'Session lost after reconnect', 'error');
+            }
         } else if (status === 'connecting') {
             badge.className = 'status-badge connecting';
             badge.textContent = 'CONNECTING...';
@@ -242,6 +268,7 @@ function setupUI() {
             E('dashboard-view').style.display = 'grid';
 
             appendLog('AUTH', `Authenticated as '${res.username}'. Token: ${res.token.substring(0, 8)}...`, 'success');
+            loadSessionData();
         } catch (err) {
             errEl.textContent = err.message || 'Login failed';
             appendLog('AUTH', `Login error: ${err.message}`, 'error');
@@ -301,11 +328,7 @@ function setupUI() {
         if (state.token) {
             await rpc.call('auth.logout', { token: state.token }).catch(console.error);
         }
-        state.authenticated = false;
-        state.token = null;
-        state.username = null;
-        E('auth-modal').style.display = 'flex';
-        E('dashboard-view').style.display = 'none';
+        showLogin();
         appendLog('AUTH', 'User logged out', 'info');
     };
 
@@ -468,7 +491,7 @@ function sendMove(direction) {
 function triggerNotif(eventId, name) {
     rpc.call('audio.notification', { event: eventId }).then((res) => {
         if (res && res.played === false) {
-            appendLog('AUDIO NOTIF', `Skipped (cooldown 1 s): ${name}`, 'info');
+            appendLog('AUDIO NOTIF', `No se reprodujo (archivo no disponible): ${name}`, 'error');
         } else {
             appendLog('AUDIO NOTIF', `Sound played: ${name}`, 'success');
         }
@@ -497,10 +520,10 @@ function updateTelemetryUI(t) {
     E('telemetry-right-speed').textContent = `${t.motors.right}%`;
     E('telemetry-direction').textContent = t.direction.toUpperCase();
 
-    // Sensors
-    updateSensorGauge('front', t.sensors.front_cm, t.sensors.obs_front);
-    updateSensorGauge('left', t.sensors.left_cm, t.sensors.obs_left);
-    updateSensorGauge('right', t.sensors.right_cm, t.sensors.obs_right);
+    // Sensors: frontal mide distancia; laterales (TCRT5000L) solo detectan
+    updateFrontGauge(t.sensors.front_cm, t.sensors.obs_front);
+    updateSideGauge('left', t.sensors.obs_left);
+    updateSideGauge('right', t.sensors.obs_right);
 
     // Obstacle Alert Banner
     const anyObs = t.sensors.obs_front || t.sensors.obs_left || t.sensors.obs_right;
@@ -513,28 +536,44 @@ function updateTelemetryUI(t) {
     updateLED('led-power', t.leds.system_on);
 
     // Audio status
-    E('audio-track-display').textContent = `${t.audio.track} (${t.audio.state.toUpperCase()})`;
+    const track = t.audio.track ? t.audio.track : '-';
+    E('audio-track-display').textContent = `${track} (${t.audio.state.toUpperCase()})`;
 
     // Robot pose
     state.robot = t.robot;
     renderMap();
 }
 
-function updateSensorGauge(name, cm, isObs) {
-    const valEl = E(`sensor-${name}-val`);
-    const barEl = E(`sensor-${name}-bar`);
+// HC-SR04: barra proporcional a la distancia (0-90 cm)
+function updateFrontGauge(cm, isObs) {
+    const valEl = E('sensor-front-val');
+    const barEl = E('sensor-front-bar');
 
-    valEl.textContent = `${cm.toFixed(1)} cm`;
+    if (cm >= FRONT_NO_ECHO_CM) {
+        valEl.textContent = 'Libre (sin eco)';
+    } else {
+        valEl.textContent = `${cm.toFixed(1)} cm`;
+    }
     const percent = Math.min(100, Math.max(0, (cm / 90) * 100));
     barEl.style.width = `${percent}%`;
 
-    if (cm < 18) {
+    if (isObs || cm < 18) {
         barEl.className = 'sensor-fill danger';
     } else if (cm < 35) {
         barEl.className = 'sensor-fill warning';
     } else {
         barEl.className = 'sensor-fill safe';
     }
+}
+
+// TCRT5000L: solo indica presencia (alcance ~1.5 cm)
+function updateSideGauge(name, isObs) {
+    const valEl = E(`sensor-${name}-val`);
+    const barEl = E(`sensor-${name}-bar`);
+
+    valEl.textContent = isObs ? 'OBSTÁCULO' : 'Libre';
+    barEl.style.width = isObs ? '15%' : '100%';
+    barEl.className = isObs ? 'sensor-fill danger' : 'sensor-fill safe';
 }
 
 function updateLED(id, active) {

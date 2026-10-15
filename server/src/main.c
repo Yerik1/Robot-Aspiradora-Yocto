@@ -14,12 +14,26 @@
 
 static const char *s_listen_on = "http://0.0.0.0:8080";
 static char s_web_root[1024] = "../client";
+static char s_db_path[512] = "users.db";
 static struct mg_rpc *s_rpc_head = NULL;
-static bool s_running = true;
+static volatile sig_atomic_t s_running = 1;
+static int s_ws_clients = 0;
 
 static void sig_handler(int sig) {
     (void)sig;
-    s_running = false;
+    s_running = 0;
+}
+
+/* Se instala DESPUES de hw_robot_init(): pigpio (dentro de robot_init)
+ * registra sus propios manejadores de senales, y sin reemplazarlos un
+ * SIGTERM de systemd terminaria el proceso sin pasar por robot_cleanup(). */
+static void install_signal_handlers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 }
 
 static void broadcast_telemetry(struct mg_mgr *mgr) {
@@ -69,6 +83,9 @@ static void broadcast_telemetry(struct mg_mgr *mgr) {
         st->robot_y,
         st->heading_deg
     );
+    if (n < 0 || (size_t)n >= sizeof(buf)) {
+        return;
+    }
 
     /* Broadcast map updates if cells changed */
     char map_buf[1024];
@@ -76,7 +93,8 @@ static void broadcast_telemetry(struct mg_mgr *mgr) {
     if (st->update_count > 0) {
         struct mg_iobuf map_io = {0, 0, 0, 256};
         mg_iobuf_init(&map_io, 1024, 256);
-        mg_iobuf_add(&map_io, map_io.len, "{\"method\":\"robot.map_update\",\"params\":{\"robot\":{", 49);
+        static const char map_head[] = "{\"method\":\"robot.map_update\",\"params\":{\"robot\":{";
+        mg_iobuf_add(&map_io, map_io.len, map_head, sizeof(map_head) - 1);   /* sin el '\0' */
         char rob_str[64];
         int rlen = snprintf(rob_str, sizeof(rob_str), "\"x\":%.2f,\"y\":%.2f,\"heading\":%.1f},\"updates\":[",
                             st->robot_x, st->robot_y, st->heading_deg);
@@ -98,7 +116,8 @@ static void broadcast_telemetry(struct mg_mgr *mgr) {
     }
 
     for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next) {
-        if (c->data[0] != 'W') continue;
+        /* Solo clientes WebSocket con sesion iniciada reciben telemetria */
+        if (c->data[0] != 'W' || c->data[1] != CONN_AUTH_FLAG) continue;
         mg_ws_send(c, buf, n, WEBSOCKET_OP_TEXT);
         if (map_n > 0) {
             mg_ws_send(c, map_buf, map_n, WEBSOCKET_OP_TEXT);
@@ -117,6 +136,7 @@ static void server_fn(struct mg_connection *c, int ev, void *ev_data) {
         // connection opened
     } else if (ev == MG_EV_WS_OPEN) {
         c->data[0] = 'W'; /* Mark as established WS connection */
+        s_ws_clients++;
         char rem_ip[64];
         mg_snprintf(rem_ip, sizeof(rem_ip), "%M", mg_print_ip_port, &c->rem);
         printf("\033[32m[WS]\033[0m Client connected from %s\n", rem_ip);
@@ -138,7 +158,9 @@ static void server_fn(struct mg_connection *c, int ev, void *ev_data) {
     } else if (ev == MG_EV_WS_MSG) {
         struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
         struct mg_iobuf io = {0, 0, 0, 1024};
-        struct mg_rpc_req r = {&s_rpc_head, 0, mg_pfn_iobuf, &io, 0, wm->data};
+        /* req_data = conexion: rpc_handlers.c marca y revisa la sesion en
+         * c->data[1] (ver CONN_AUTH_FLAG en rpc_handlers.h) */
+        struct mg_rpc_req r = {&s_rpc_head, 0, mg_pfn_iobuf, &io, c, wm->data};
         mg_rpc_process(&r);
         if (io.buf && io.len > 0) {
             mg_ws_send(c, (char *)io.buf, io.len, WEBSOCKET_OP_TEXT);
@@ -150,6 +172,15 @@ static void server_fn(struct mg_connection *c, int ev, void *ev_data) {
             mg_snprintf(rem_ip, sizeof(rem_ip), "%M", mg_print_ip_port, &c->rem);
             printf("\033[33m[WS]\033[0m Client disconnected (%s)\n", rem_ip);
             c->data[0] = 0;
+            if (s_ws_clients > 0) s_ws_clients--;
+
+            /* Seguridad: en modo manual nadie controla el robot si se cae
+             * el ultimo cliente, asi que se detienen los motores. En modo
+             * autonomo sigue navegando por su cuenta. */
+            if (s_ws_clients == 0 && hw_robot_get_state()->mode == MODE_MANUAL) {
+                hw_robot_stop();
+                printf("\033[33m[ROBOT]\033[0m No clients left: motors stopped.\n");
+            }
         }
     }
 }
@@ -173,7 +204,8 @@ static void resolve_web_root(void) {
         "../client",
         "./client",
         "Robot-Aspiradora-Yocto/client",
-        "client"
+        "client",
+        "/usr/share/robot-server/client"
     };
 
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
@@ -198,9 +230,6 @@ int main(int argc, char *argv[]) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
-
     int opt;
     while ((opt = getopt(argc, argv, "p:r:d:h")) != -1) {
         switch (opt) {
@@ -214,7 +243,7 @@ int main(int argc, char *argv[]) {
                 snprintf(s_web_root, sizeof(s_web_root), "%s", optarg);
                 break;
             case 'd':
-                auth_init(optarg);
+                snprintf(s_db_path, sizeof(s_db_path), "%s", optarg);
                 break;
             case 'h':
             default:
@@ -225,46 +254,53 @@ int main(int argc, char *argv[]) {
 
     resolve_web_root();
 
+    /* Initialize subsystems */
+    auth_init(s_db_path);
+    if (!hw_robot_init()) {
+        fprintf(stderr, "\033[31m[FATAL]\033[0m Robot hardware init failed. Exiting.\n");
+        auth_cleanup();
+        return 1;   /* systemd reinicia el servicio */
+    }
+    install_signal_handlers();
+
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
     mg_log_set(MG_LL_INFO);
-
-    /* Initialize subsystems */
-    auth_init("users.db");
-    hw_robot_init();
     rpc_handlers_init(&s_rpc_head);
 
-    /* Audible feedback: system startup */
-    hw_robot_audio_play_notification(NOTIF_SYSTEM_START);
+    /* El sonido de inicio del sistema lo reproduce el servicio
+     * robot-startup-sound al arrancar; el servidor no lo repite. */
 
-    /* Add 5 Hz simulation and telemetry timer (every 200 ms) */
+    /* 5 Hz control and telemetry timer (every 200 ms) */
     mg_timer_add(&mgr, 200, MG_TIMER_REPEAT, timer_tick, &mgr);
 
     printf("\n=======================================================\n");
-    printf("   Robot Aspiradora Autónomo - Mongoose Web Server     \n");
+    printf("   Robot Aspiradora Autonomo - Mongoose Web Server     \n");
     printf("=======================================================\n");
     printf(" HTTP / Web Root : %s\n", s_web_root);
+    printf(" Users DB        : %s\n", s_db_path);
     printf(" Listening on    : %s\n", s_listen_on);
     printf(" WebSocket URL   : %s/websocket\n", s_listen_on);
     printf(" Default User    : admin / admin123\n");
     printf(" Press Ctrl+C to terminate\n");
     printf("=======================================================\n\n");
 
+    int rc = 0;
     if (mg_http_listen(&mgr, s_listen_on, server_fn, NULL) == NULL) {
         fprintf(stderr, "Failed to start listener on %s\n", s_listen_on);
-        return 1;
+        rc = 1;
+    } else {
+        while (s_running) {
+            mg_mgr_poll(&mgr, 50);
+        }
+        printf("\n\033[33m[SHUTDOWN]\033[0m Shutting down server gracefully...\n");
     }
 
-    while (s_running) {
-        mg_mgr_poll(&mgr, 50);
-    }
-
-    printf("\n\033[33m[SHUTDOWN]\033[0m Shutting down server gracefully...\n");
     mg_mgr_free(&mgr);
     mg_rpc_del(&s_rpc_head, NULL);
-    hw_robot_audio_shutdown();
+    hw_robot_shutdown();
     auth_cleanup();
 
     printf("\033[32m[SHUTDOWN]\033[0m Clean exit.\n");
-    return 0;
+    return rc;
 }

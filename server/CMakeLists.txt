@@ -38,5 +38,31 @@ target_link_libraries(robot-server PRIVATE
 
 install(TARGETS robot-server DESTINATION bin)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../client DESTINATION share/robot-server)
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/music DESTINATION share/robot-server/server)
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/SoundEffects DESTINATION share/robot-server/server)
+
+# Audio: se instala en las mismas carpetas que usa librobot (audio.c).
+#   music/*.mp3   -> share/robot-aspirador/music  (canciones del reproductor)
+#   SoundEffects/ -> share/robot-aspirador/audio  (notificaciones), con el
+#                    nombre que espera librobot. inicio.mp3 no se instala:
+#                    system_start.mp3 ya lo instala la receta
+#                    robot-startup-sound.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/music)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/music/
+            DESTINATION share/robot-aspirador/music
+            FILES_MATCHING PATTERN "*.mp3")
+endif()
+
+set(SFX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SoundEffects)
+foreach(pair "modoautomatico.mp3:autonomous_start.mp3"
+             "obstaculo.mp3:obstacle.mp3"
+             "modomanual.mp3:manual_mode.mp3")
+    string(REPLACE ":" ";" pair_list ${pair})
+    list(GET pair_list 0 sfx_src)
+    list(GET pair_list 1 sfx_dst)
+    if(EXISTS ${SFX_DIR}/${sfx_src})
+        install(FILES ${SFX_DIR}/${sfx_src}
+                DESTINATION share/robot-aspirador/audio
+                RENAME ${sfx_dst})
+    else()
+        message(WARNING "No se encontro SoundEffects/${sfx_src}")
+    endif()
+endforeach()
