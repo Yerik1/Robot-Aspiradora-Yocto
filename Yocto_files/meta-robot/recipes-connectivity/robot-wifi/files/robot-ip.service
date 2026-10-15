@@ -1,0 +1,12 @@
+[Unit]
+Description=Mostrar la IP del WiFi en pantalla
+After=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/robot-ip.sh
+StandardOutput=journal+console
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

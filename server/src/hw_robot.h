@@ -12,6 +12,10 @@
 #define CELL_VISITED  1
 #define CELL_OBSTACLE 2
 
+/* Nombres de canciones que devuelve hw_robot_audio_list() */
+#define TRACK_NAME_MAX   64
+#define TRACK_LIST_MAX   32
+
 typedef enum {
     MODE_AUTONOMOUS = 0,
     MODE_MANUAL     = 1
@@ -44,13 +48,17 @@ typedef struct {
     char direction[16];   /* "forward", "backward", "left", "right", "stop" */
     uint8_t speed_percent;
     uint8_t radius_percent;
-    uint8_t left_motor_speed;
+    uint8_t left_motor_speed;   /* estimado a partir del comando enviado */
     uint8_t right_motor_speed;
 
     /* Suction Motor */
     bool vacuum_on;
 
-    /* Sensors */
+    /* Sensors
+     * front_distance_cm: HC-SR04. Sin eco se reporta el alcance maximo.
+     * left/right_distance_cm: los TCRT5000L no miden distancia; se reporta
+     * el alcance del sensor (~1.5 cm) si hay obstaculo y -1 si esta libre.
+     * Para la interfaz usar left_obstacle / right_obstacle. */
     float front_distance_cm;
     float left_distance_cm;
     float right_distance_cm;
@@ -69,7 +77,7 @@ typedef struct {
     char current_track[64];
     uint8_t volume_percent;
 
-    /* Map & Position */
+    /* Map & Position (odometria estimada, sin encoders) */
     float robot_x;
     float robot_y;
     float heading_deg;
@@ -81,12 +89,20 @@ typedef struct {
 } robot_state_t;
 
 /**
- * Initializes the simulated robot state, generates map layout with simulated obstacles.
+ * Inicializa librobot, los LEDs de estado y el hilo de sensores.
+ * Devuelve false si el hardware no se pudo inicializar.
  */
-void hw_robot_init(void);
+bool hw_robot_init(void);
 
 /**
- * Advances the simulation by dt seconds (called from Mongoose timer).
+ * Detiene el hilo de sensores, los motores y el aspirado, y libera
+ * librobot. Debe llamarse una sola vez al cerrar el servidor.
+ */
+void hw_robot_shutdown(void);
+
+/**
+ * Avanza la maquina de estados y la odometria dt segundos
+ * (llamado desde el temporizador de Mongoose).
  */
 void hw_robot_tick(double dt_seconds);
 
@@ -102,6 +118,7 @@ bool hw_robot_set_mode(robot_mode_t mode);
 bool hw_robot_move(const char *direction, uint8_t speed, uint8_t radius);
 bool hw_robot_stop(void);
 bool hw_robot_set_vacuum(bool on);
+bool hw_robot_set_vacuum_manual(bool on);
 
 /**
  * Audio API
@@ -114,16 +131,10 @@ bool hw_robot_audio_set_volume(uint8_t volume);
 bool hw_robot_audio_play_notification(notif_event_t event);
 
 /**
- * Notification channel housekeeping: detects (non-blocking) when the current
- * notification sound has finished and restores the music volume (ducking).
- * Called from hw_robot_tick().
+ * Llena names con los nombres (sin ruta) de las canciones disponibles.
+ * Devuelve cuantas encontro (como maximo max_count).
  */
-void hw_robot_audio_service(void);
-
-/**
- * Stops the notification process and the music player (on server shutdown).
- */
-void hw_robot_audio_shutdown(void);
+size_t hw_robot_audio_list(char names[][TRACK_NAME_MAX], size_t max_count);
 
 /**
  * Map API

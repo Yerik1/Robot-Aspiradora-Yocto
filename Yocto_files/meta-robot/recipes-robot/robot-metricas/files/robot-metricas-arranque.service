@@ -1,0 +1,14 @@
+[Unit]
+Description=Metricas de arranque (Demo 1): rootfs y tiempo hasta robot-server operativo
+After=robot-server.service
+Wants=robot-server.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/robot-metricas --arranque
+StandardOutput=journal+console
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
