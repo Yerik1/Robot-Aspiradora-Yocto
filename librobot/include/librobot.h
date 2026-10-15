@@ -127,6 +127,8 @@ typedef enum {
 robot_status_t sensor_read_distance_cm(sensor_id_t sensor, float *distance_cm);
 
 /** true si la distancia leída es menor o igual a threshold_cm. */
+robot_status_t sensor_read_obstacle(sensor_id_t sensor, float threshold_cm, bool *detected);
+
 bool sensor_obstacle_detected(sensor_id_t sensor, float threshold_cm);
 
 /* ==========================================================================

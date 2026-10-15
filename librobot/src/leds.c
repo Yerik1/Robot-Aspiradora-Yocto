@@ -1,215 +1,326 @@
 /**
  * leds.c
  *
- * Implementación de US-302 (LEDs de estado): encendido directo, toggle, y
- * parpadeo no bloqueante en un hilo aparte.
+ * Indicadores de estado sobre una tira de 4 LEDs SK6812MINI-E controlada
+ * por SPI (ver robot_pins.h). Cada led_id_t de la API corresponde a un
+ * tramo de la tira con su propio color, de modo que la API pública
+ * (led_set, led_toggle, led_blink, led_stop_blink) no cambia.
  *
- * A diferencia de los pines de motor, los LEDs están conectados
- * directamente a GPIO en el dominio "rasp gnd" (no pasan por
- * optoacoplador), así que no hay inversión de nivel que compensar aquí:
- * GPIO alto = LED encendido.
+ * Patrón de trabajo: el estado lógico se pinta en un búfer de colores y
+ * el búfer completo se envía a la tira en una sola transferencia SPI.
+ *
+ * Compilar con -DLIBROBOT_SIM para probar en una PC sin /dev/spidev: en
+ * ese modo las transferencias se omiten.
  */
-#include <pigpio.h>
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
-#include <stddef.h>
-#include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/spi/spidev.h>
+
 #include "../include/librobot.h"
 #include "internal.h"
 #include "robot_pins.h"
 
-typedef struct {
-    int pin;
-    bool state;                 /* true = encendido */
-    bool blink_active;          /* señal para que el hilo de parpadeo pare */
-    pthread_t blink_thread;
-    bool blink_thread_running;  /* true si hay un hilo detached en curso */
-    pthread_mutex_t lock;
-} led_ctx_t;
+#define LED_COUNT_LOGICAL   4
+#define SPI_BYTES_PER_LED   12      /* 3 colores x 8 bits x 4 bits SPI */
+#define SPI_LEAD_BYTES      1       /* asegura MOSI en bajo al inicio  */
+#define SPI_RESET_BYTES     48      /* 48 x 2.5 us = 120 us en bajo    */
+#define SPI_FRAME_BYTES     (SPI_LEAD_BYTES + LED_STRIP_COUNT * SPI_BYTES_PER_LED + SPI_RESET_BYTES)
+#define BLINK_TICK_MS       10
 
-static led_ctx_t g_leds[4] = {
-    [LED_AUTONOMOUS_MODE] = { .pin = PIN_LED_AUTONOMOUS_MODE, .lock = PTHREAD_MUTEX_INITIALIZER },
-    [LED_MANUAL_MODE]     = { .pin = PIN_LED_MANUAL_MODE,     .lock = PTHREAD_MUTEX_INITIALIZER },
-    [LED_OBSTACLE_ALERT]  = { .pin = PIN_LED_OBSTACLE_ALERT,  .lock = PTHREAD_MUTEX_INITIALIZER },
-    [LED_SYSTEM_ON]       = { .pin = PIN_LED_SYSTEM_ON,       .lock = PTHREAD_MUTEX_INITIALIZER },
+typedef struct {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} LedColor;
+
+typedef struct {
+    int start;
+    int count;
+    LedColor color;
+} LedZone;
+
+typedef struct {
+    bool on;
+    bool blinking;
+    uint32_t freq_hz;
+    uint64_t blink_start_ms;
+    uint64_t blink_end_ms;      /* 0 = indefinido */
+} LedState;
+
+/* Índice = led_id_t. Colores con brillo limitado por LED_STRIP_MAX_LEVEL. */
+static const LedZone g_zones[LED_COUNT_LOGICAL] = {
+    [LED_AUTONOMOUS_MODE] = { LED_ZONE_AUTONOMOUS_START, LED_ZONE_AUTONOMOUS_COUNT,
+                              { 0, LED_STRIP_MAX_LEVEL, 0 } },                  /* verde    */
+    [LED_MANUAL_MODE]     = { LED_ZONE_MANUAL_START, LED_ZONE_MANUAL_COUNT,
+                              { 0, 0, LED_STRIP_MAX_LEVEL } },                  /* azul     */
+    [LED_OBSTACLE_ALERT]  = { LED_ZONE_OBSTACLE_START, LED_ZONE_OBSTACLE_COUNT,
+                              { LED_STRIP_MAX_LEVEL, 0, 0 } },                  /* rojo     */
+    [LED_SYSTEM_ON]       = { LED_ZONE_SYSTEM_ON_START, LED_ZONE_SYSTEM_ON_COUNT,
+                              { LED_STRIP_MAX_LEVEL / 2, LED_STRIP_MAX_LEVEL / 2,
+                                LED_STRIP_MAX_LEVEL / 2 } },                    /* blanco   */
 };
 
-/* Tiempo que led_stop_blink()/led_set() esperan a que el hilo de parpadeo
- * note blink_active==false y termine, antes de devolver el control. Es un
- * límite superior bajo (el hilo revisa la bandera en cada medio periodo,
- * como mucho); no bloquea indefinidamente. */
-#define BLINK_STOP_GRACE_US 20000
+static pthread_mutex_t g_led_lock = PTHREAD_MUTEX_INITIALIZER;
+static LedState g_state[LED_COUNT_LOGICAL];
+static LedColor g_pixels[LED_STRIP_COUNT];
+static uint8_t g_frame[SPI_FRAME_BYTES];
+static int g_spi_fd = -1;
 
-typedef struct {
-    led_ctx_t *led;
-    uint32_t half_period_us;
-    uint32_t duration_ms; /* 0 = indefinido */
-} blink_args_t;
+static pthread_t g_blink_thread;
+static bool g_blink_thread_running = false;
+static bool g_blink_thread_stop = false;
 
-static void *blink_thread_fn(void *arg)
+/* ========================================================================= */
+
+static uint64_t now_ms(void)
 {
-    blink_args_t *args = (blink_args_t *)arg;
-    led_ctx_t *led = args->led;
-    uint32_t half_period_us = args->half_period_us;
-    uint32_t duration_ms = args->duration_ms;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
 
-    uint32_t elapsed_us = 0;
-    bool level = true;
+/* Un byte de color -> 4 bytes SPI (cada bit del LED ocupa 4 bits SPI). */
+static void encode_byte(uint8_t value, uint8_t *out)
+{
+    for (int i = 0; i < 4; i++) {
+        int bit_hi = (value >> (7 - 2 * i)) & 1;
+        int bit_lo = (value >> (6 - 2 * i)) & 1;
+        uint8_t nib_hi = bit_hi ? 0xC : 0x8;   /* 1100 o 1000 */
+        uint8_t nib_lo = bit_lo ? 0xC : 0x8;
+        out[i] = (uint8_t)((nib_hi << 4) | nib_lo);
+    }
+}
 
-    for (;;) {
-        pthread_mutex_lock(&led->lock);
-        bool still_active = led->blink_active;
-        pthread_mutex_unlock(&led->lock);
+/* Pinta los indicadores encendidos sobre el búfer de colores. */
+static void render_pixels(void)
+{
+    memset(g_pixels, 0, sizeof(g_pixels));
+    for (int led = 0; led < LED_COUNT_LOGICAL; led++) {
+        if (!g_state[led].on) {
+            continue;
+        }
+        const LedZone *z = &g_zones[led];
+        for (int i = z->start; i < z->start + z->count && i < LED_STRIP_COUNT; i++) {
+            g_pixels[i] = z->color;
+        }
+    }
+}
 
-        if (!still_active) break;
-        if (duration_ms != 0 && (elapsed_us / 1000) >= duration_ms) break;
+/* Envía el búfer completo a la tira. Debe llamarse con g_led_lock tomado. */
+static robot_status_t flush_strip(void)
+{
+    render_pixels();
 
-        gpioWrite(led->pin, level ? 1 : 0);
-        led->state = level;
-        level = !level;
-
-        gpioDelay(half_period_us);
-        elapsed_us += half_period_us;
+    memset(g_frame, 0, sizeof(g_frame));
+    uint8_t *p = g_frame + SPI_LEAD_BYTES;
+    for (int i = 0; i < LED_STRIP_COUNT; i++) {
+        /* SK6812: orden de envío G, R, B */
+        encode_byte(g_pixels[i].g, p);     p += 4;
+        encode_byte(g_pixels[i].r, p);     p += 4;
+        encode_byte(g_pixels[i].b, p);     p += 4;
     }
 
-    pthread_mutex_lock(&led->lock);
-    led->blink_active = false;
-    led->blink_thread_running = false;
-    pthread_mutex_unlock(&led->lock);
+#ifdef LIBROBOT_SIM
+    return ROBOT_OK;
+#else
+    if (g_spi_fd < 0) {
+        return ROBOT_ERR_GPIO;
+    }
+    struct spi_ioc_transfer tr;
+    memset(&tr, 0, sizeof(tr));
+    tr.tx_buf = (unsigned long)g_frame;
+    tr.len = sizeof(g_frame);
+    tr.speed_hz = LED_STRIP_SPI_HZ;
+    tr.bits_per_word = 8;
 
-    free(args);
+    if (ioctl(g_spi_fd, SPI_IOC_MESSAGE(1), &tr) < 0) {
+        return ROBOT_ERR_GPIO;
+    }
+    return ROBOT_OK;
+#endif
+}
+
+/* Hilo que actualiza los LEDs en parpadeo. */
+static void *blink_thread_fn(void *arg)
+{
+    (void)arg;
+    struct timespec tick = { 0, BLINK_TICK_MS * 1000000L };
+
+    for (;;) {
+        pthread_mutex_lock(&g_led_lock);
+        if (g_blink_thread_stop) {
+            pthread_mutex_unlock(&g_led_lock);
+            break;
+        }
+
+        bool changed = false;
+        uint64_t t = now_ms();
+        for (int led = 0; led < LED_COUNT_LOGICAL; led++) {
+            LedState *s = &g_state[led];
+            if (!s->blinking) {
+                continue;
+            }
+            bool next_on;
+            if (s->blink_end_ms != 0 && t >= s->blink_end_ms) {
+                s->blinking = false;
+                next_on = false;            /* al terminar queda apagado */
+            } else {
+                uint64_t half_period_ms = 500u / s->freq_hz;
+                if (half_period_ms == 0) {
+                    half_period_ms = 1;
+                }
+                next_on = (((t - s->blink_start_ms) / half_period_ms) % 2u) == 0;
+            }
+            if (next_on != s->on) {
+                s->on = next_on;
+                changed = true;
+            }
+        }
+        if (changed) {
+            flush_strip();
+        }
+        pthread_mutex_unlock(&g_led_lock);
+
+        nanosleep(&tick, NULL);
+    }
     return NULL;
 }
 
-static robot_status_t start_blink_thread(led_ctx_t *led, uint32_t freq_hz, uint32_t duration_ms)
+/* ========================================================================= */
+/* Inicialización / limpieza (invocadas por robot_init / robot_cleanup)      */
+/* ========================================================================= */
+
+robot_status_t led_module_init(void)
 {
-    blink_args_t *args = malloc(sizeof(blink_args_t));
-    if (args == NULL) return ROBOT_ERR_GPIO;
+    memset(g_state, 0, sizeof(g_state));
 
-    args->led = led;
-    args->half_period_us = (uint32_t)(500000.0 / (double)freq_hz);
-    args->duration_ms = duration_ms;
-
-    led->blink_active = true;
-    led->blink_thread_running = true;
-
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, blink_thread_fn, args) != 0) {
-        led->blink_active = false;
-        led->blink_thread_running = false;
-        free(args);
+#ifndef LIBROBOT_SIM
+    g_spi_fd = open(LED_STRIP_SPI_DEVICE, O_RDWR);
+    if (g_spi_fd < 0) {
+        fprintf(stderr, "librobot: no se pudo abrir %s (%s)\n",
+                LED_STRIP_SPI_DEVICE, strerror(errno));
         return ROBOT_ERR_GPIO;
     }
-    pthread_detach(tid);
+    uint8_t mode = SPI_MODE_0;
+    uint8_t bits = 8;
+    uint32_t speed = LED_STRIP_SPI_HZ;
+    if (ioctl(g_spi_fd, SPI_IOC_WR_MODE, &mode) < 0 ||
+        ioctl(g_spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
+        ioctl(g_spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
+        close(g_spi_fd);
+        g_spi_fd = -1;
+        return ROBOT_ERR_GPIO;
+    }
+#endif
 
+    pthread_mutex_lock(&g_led_lock);
+    robot_status_t st = flush_strip();          /* tira apagada */
+    g_blink_thread_stop = false;
+    pthread_mutex_unlock(&g_led_lock);
+    if (st != ROBOT_OK) {
+        return st;
+    }
+
+    if (pthread_create(&g_blink_thread, NULL, blink_thread_fn, NULL) != 0) {
+        return ROBOT_ERR_GPIO;
+    }
+    g_blink_thread_running = true;
     return ROBOT_OK;
 }
 
-/** Detiene cualquier parpadeo activo de un LED y espera un tiempo acotado
- *  a que el hilo termine, sin llamar a la API pública (para poder usarse
- *  también desde el cleanup del módulo). */
-static void stop_blink_internal(led_ctx_t *led)
+void led_module_cleanup(void)
 {
-    pthread_mutex_lock(&led->lock);
-    bool was_running = led->blink_thread_running;
-    led->blink_active = false;
-    pthread_mutex_unlock(&led->lock);
+    if (g_blink_thread_running) {
+        pthread_mutex_lock(&g_led_lock);
+        g_blink_thread_stop = true;
+        pthread_mutex_unlock(&g_led_lock);
+        pthread_join(g_blink_thread, NULL);
+        g_blink_thread_running = false;
+    }
 
-    if (was_running) {
-        gpioDelay(BLINK_STOP_GRACE_US);
+    pthread_mutex_lock(&g_led_lock);
+    memset(g_state, 0, sizeof(g_state));
+    flush_strip();                              /* apaga la tira */
+    pthread_mutex_unlock(&g_led_lock);
+
+    if (g_spi_fd >= 0) {
+        close(g_spi_fd);
+        g_spi_fd = -1;
     }
 }
 
-/* ==========================================================================
- * API pública -- US-302
- * ========================================================================== */
+/* ========================================================================= */
+/* API pública                                                               */
+/* ========================================================================= */
+
+static bool valid_led(led_id_t led)
+{
+    return (int)led >= 0 && (int)led < LED_COUNT_LOGICAL;
+}
 
 robot_status_t led_set(led_id_t led, bool on)
 {
     if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
-    if (led < LED_AUTONOMOUS_MODE || led > LED_SYSTEM_ON) return ROBOT_ERR_INVALID_PARAM;
+    if (!valid_led(led))      return ROBOT_ERR_INVALID_PARAM;
 
-    led_ctx_t *ctx = &g_leds[led];
-    stop_blink_internal(ctx);
-
-    gpioWrite(ctx->pin, on ? 1 : 0);
-    ctx->state = on;
-
-    return ROBOT_OK;
+    pthread_mutex_lock(&g_led_lock);
+    g_state[led].blinking = false;
+    g_state[led].on = on;
+    robot_status_t st = flush_strip();
+    pthread_mutex_unlock(&g_led_lock);
+    return st;
 }
 
 robot_status_t led_toggle(led_id_t led)
 {
     if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
-    if (led < LED_AUTONOMOUS_MODE || led > LED_SYSTEM_ON) return ROBOT_ERR_INVALID_PARAM;
+    if (!valid_led(led))      return ROBOT_ERR_INVALID_PARAM;
 
-    led_ctx_t *ctx = &g_leds[led];
-    stop_blink_internal(ctx);
-
-    bool new_state = !ctx->state;
-    gpioWrite(ctx->pin, new_state ? 1 : 0);
-    ctx->state = new_state;
-
-    return ROBOT_OK;
+    pthread_mutex_lock(&g_led_lock);
+    g_state[led].blinking = false;
+    g_state[led].on = !g_state[led].on;
+    robot_status_t st = flush_strip();
+    pthread_mutex_unlock(&g_led_lock);
+    return st;
 }
 
 robot_status_t led_blink(led_id_t led, uint32_t freq_hz, uint32_t duration_ms)
 {
-    if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
-    if (led < LED_AUTONOMOUS_MODE || led > LED_SYSTEM_ON) return ROBOT_ERR_INVALID_PARAM;
-    if (freq_hz == 0) return ROBOT_ERR_INVALID_PARAM;
+    if (!g_robot_initialized)       return ROBOT_ERR_NOT_INITIALIZED;
+    if (!valid_led(led))            return ROBOT_ERR_INVALID_PARAM;
+    if (freq_hz == 0 || freq_hz > 50) return ROBOT_ERR_INVALID_PARAM;
 
-    led_ctx_t *ctx = &g_leds[led];
-    stop_blink_internal(ctx);
-
-    return start_blink_thread(ctx, freq_hz, duration_ms);
+    pthread_mutex_lock(&g_led_lock);
+    uint64_t t = now_ms();
+    g_state[led].blinking = true;
+    g_state[led].freq_hz = freq_hz;
+    g_state[led].blink_start_ms = t;
+    g_state[led].blink_end_ms = (duration_ms == 0) ? 0 : t + duration_ms;
+    g_state[led].on = true;
+    robot_status_t st = flush_strip();
+    pthread_mutex_unlock(&g_led_lock);
+    return st;
 }
 
 robot_status_t led_stop_blink(led_id_t led)
 {
     if (!g_robot_initialized) return ROBOT_ERR_NOT_INITIALIZED;
-    if (led < LED_AUTONOMOUS_MODE || led > LED_SYSTEM_ON) return ROBOT_ERR_INVALID_PARAM;
+    if (!valid_led(led))      return ROBOT_ERR_INVALID_PARAM;
 
-    led_ctx_t *ctx = &g_leds[led];
-    stop_blink_internal(ctx);
-
-    gpioWrite(ctx->pin, 0);
-    ctx->state = false;
-
-    return ROBOT_OK;
-}
-
-/* ==========================================================================
- * Init / cleanup internos (llamados por librobot.c)
- * ========================================================================== */
-
-robot_status_t led_module_init(void)
-{
-    led_id_t ids[] = { LED_AUTONOMOUS_MODE, LED_MANUAL_MODE, LED_OBSTACLE_ALERT, LED_SYSTEM_ON };
-    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
-        led_ctx_t *ctx = &g_leds[ids[i]];
-        if (gpioSetMode(ctx->pin, PI_OUTPUT) != 0) return ROBOT_ERR_GPIO;
-        gpioWrite(ctx->pin, 0);
-        ctx->state = false;
-        ctx->blink_active = false;
-        ctx->blink_thread_running = false;
-    }
-    return ROBOT_OK;
-}
-
-/**
- * IMPORTANTE: al igual que motor_module_cleanup(), esta función corre
- * DESPUÉS de que g_robot_initialized ya es false, así que manipula el
- * estado directamente (vía stop_blink_internal(), que no depende de ese
- * flag) en vez de llamar a la API pública led_stop_blink(), que sí lo
- * revisa y haría un no-op silencioso dejando algún LED parpadeando.
- */
-void led_module_cleanup(void)
-{
-    led_id_t ids[] = { LED_AUTONOMOUS_MODE, LED_MANUAL_MODE, LED_OBSTACLE_ALERT, LED_SYSTEM_ON };
-    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
-        led_ctx_t *ctx = &g_leds[ids[i]];
-        stop_blink_internal(ctx);
-        gpioWrite(ctx->pin, 0);
-        ctx->state = false;
-    }
+    pthread_mutex_lock(&g_led_lock);
+    g_state[led].blinking = false;
+    g_state[led].on = false;
+    robot_status_t st = flush_strip();
+    pthread_mutex_unlock(&g_led_lock);
+    return st;
 }

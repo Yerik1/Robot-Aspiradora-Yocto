@@ -73,7 +73,7 @@ static void apply_en_duty(int gpio, uint8_t duty_percent)
 {
     double compensated = 100.0 - (double)duty_percent;
     unsigned pwm_value = (unsigned)((compensated / 100.0) * 1000000.0);
-    gpioHardwarePWM(gpio, MOTOR_PWM_FREQ_HZ, pwm_value);
+    ROBOT_SOFT_PWM(gpio, MOTOR_PWM_FREQ_HZ, pwm_value);
 }
 
 /** Fija los pines de dirección de un motor según motor_direction_t. */
@@ -348,3 +348,4 @@ void motor_module_cleanup(void)
     g_motors[MOTOR_RIGHT].current_duty = 0;
     g_vacuum_on = false;
 }
+

@@ -1,0 +1,17 @@
+[Unit]
+Description=Robot Aspiradora - servidor web (Mongoose, JSON-RPC sobre WebSocket)
+After=network.target sound.target robot-startup-sound.service
+
+[Service]
+Type=simple
+Environment=ALSA_CARD=Headphones
+ExecStartPre=-/usr/bin/amixer -q -c Headphones sset PCM 100%% unmute
+ExecStart=/usr/bin/robot-server -p 8080 -r /usr/share/robot-server/client -d /var/lib/robot-server/users.db
+StateDirectory=robot-server
+WorkingDirectory=/var/lib/robot-server
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target
