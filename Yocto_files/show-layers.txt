@@ -1,0 +1,8 @@
+NOTE: Starting bitbake server...
+layer                 path                                                                    priority
+========================================================================================================
+core                  /home/lelito/poky-scarthgap-5.0.15/meta                                 5
+yocto                 /home/lelito/poky-scarthgap-5.0.15/meta-poky                            5
+yoctobsp              /home/lelito/poky-scarthgap-5.0.15/meta-yocto-bsp                       5
+raspberrypi           /home/lelito/poky-scarthgap-5.0.15/meta-raspberrypi                     9
+meta-robot            /home/lelito/poky-scarthgap-5.0.15/meta-robot                           6

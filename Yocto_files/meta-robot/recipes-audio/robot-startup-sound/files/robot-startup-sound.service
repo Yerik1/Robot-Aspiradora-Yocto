@@ -1,0 +1,11 @@
+[Unit]
+Description=Sonido de notificacion de inicio del Robot Aspiradora
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mpg123 -q /usr/share/robot-aspirador/audio/system_start.mp3
+
+[Install]
+WantedBy=multi-user.target
